@@ -5,8 +5,11 @@
 # red-green-refactor cycle stays fast.
 
 CC      ?= cc
-CFLAGS  ?= -O0 -g -Wall -Wextra -Werror -std=c11
-LDFLAGS ?=
+# ASAN catches the latent OOB read that an "INCOMPLETE" decode could otherwise
+# get away with by accident. -fno-omit-frame-pointer keeps stack traces clean.
+CFLAGS  ?= -O0 -g -Wall -Wextra -Werror -std=c11 \
+           -fsanitize=address,undefined -fno-omit-frame-pointer
+LDFLAGS ?= -fsanitize=address,undefined
 
 TESTS_SRC := $(wildcard *_test.c)
 TESTS_BIN := $(TESTS_SRC:_test.c=_test)

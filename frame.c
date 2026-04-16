@@ -2,16 +2,36 @@
 
 #include <string.h>
 
-/* Single-byte varint for now (covers values < 64). Future cycles will widen
- * this in lock-step with new failing tests for the larger ranges. */
+/* QUIC-style varint (RFC 9000 §16). Top two bits of the first byte select
+ * the encoded length: 0b00=1 byte, 0b01=2 bytes, 0b10=4 bytes, 0b11=8 bytes.
+ * The remaining bits hold the value, big-endian. We currently widen up to
+ * the 2-byte form (max value 16383); the 4-byte form will be added in a
+ * later cycle when a test demands it. */
 static size_t varint_encode(uint64_t v, uint8_t *out) {
-	out[0] = (uint8_t)v;
-	return 1;
+	if (v < (1ull << 6)) {
+		out[0] = (uint8_t)v;
+		return 1;
+	}
+	/* 2-byte form: 14-bit value, prefix 0b01. */
+	out[0] = (uint8_t)(0x40 | (v >> 8));
+	out[1] = (uint8_t)(v & 0xff);
+	return 2;
 }
 
-static size_t varint_decode(const uint8_t *buf, uint64_t *p_value) {
-	*p_value = buf[0];
-	return 1;
+/* Returns the number of bytes consumed (1 or 2), or 0 if `avail` is too
+ * small to hold the indicated varint. Caller must check `avail >= 1`
+ * before calling so we can examine the prefix safely. */
+static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value) {
+	uint8_t prefix = buf[0] >> 6;
+	if (prefix == 0) {
+		*p_value = buf[0];
+		return 1;
+	}
+	if (avail < 2) {
+		return 0;
+	}
+	*p_value = ((uint64_t)(buf[0] & 0x3f) << 8) | buf[1];
+	return 2;
 }
 
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,
@@ -41,7 +61,10 @@ wtd_frame_status_t wtd_frame_decode(const uint8_t *buf, size_t buf_len,
 		return WTD_FRAME_INCOMPLETE; /* need at least 1 varint byte */
 	}
 	uint64_t plen = 0;
-	size_t vlen = varint_decode(buf + 1, &plen);
+	size_t vlen = varint_decode(buf + 1, buf_len - 1, &plen);
+	if (vlen == 0) {
+		return WTD_FRAME_INCOMPLETE; /* multi-byte varint is truncated */
+	}
 	size_t total = 1 + vlen + (size_t)plen;
 	if (buf_len < total) {
 		return WTD_FRAME_INCOMPLETE; /* payload not all here yet */
