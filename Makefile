@@ -1,4 +1,4 @@
-# webtransportd-2 — TDD-driven build.
+# webtransportd — TDD-driven build.
 #
 # `make test` runs every `*_test.c` in this directory as its own binary,
 # expecting exit code 0. The loop is intentionally minimal so the

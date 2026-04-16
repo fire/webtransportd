@@ -1,4 +1,4 @@
-# webtransportd-2 — TODO
+# webtransportd — TODO
 
 A standalone C WebTransport (HTTP/3) daemon that exec's a child process
 per accepted session and pipes data between the WT session and the
