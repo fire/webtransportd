@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/h2o/picotls.git
+	branch = master
+	commit = 3b4d709fb413317aadbd7ba7c040b7b988c3c310
+	parent = b82e78db688ef9e1934e644aac014dfbe9476529
+	cmdver = 0.1.0

@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/private-octopus/picoquic.git
+	branch = master
+	commit = 790e973b1aa5625fd2da99f92ce02cb3c616b5ec
+	parent = db364a521539153cffc6134404636ba395c84433
+	cmdver = 0.1.0
