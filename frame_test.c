@@ -12,10 +12,14 @@
  *   the extra varint byte.
  * - Cycle 6: close the latent OOB-read door from cycle 5. ASAN-fenced
  *   exact-sized prefixes confirm decode never reads past the buffer.
- * - Cycle 7 (this addition): payload >= 16384 bytes pushes the length past
- *   the 2-byte varint range. Round-trip must still work, the on-wire
- *   length prefix must be the 4-byte form (top two bits = 0b10), and
- *   the ASAN-fenced incomplete-prefix coverage extends to this size.
+ * - Cycle 7: payload >= 16384 bytes pushes the length past the 2-byte
+ *   varint range. Round-trip must still work, the on-wire length prefix
+ *   must be the 4-byte form (top two bits = 0b10), and the ASAN-fenced
+ *   incomplete-prefix coverage extends to this size.
+ * - Cycle 8 (this addition): two frames packed back-to-back in the same
+ *   buffer must each decode independently. `consumed` must report the
+ *   exact length of the just-decoded frame (not the buffer), so the
+ *   caller can advance and decode the next one.
  */
 
 #include "frame.h"
@@ -221,6 +225,46 @@ static void cycle7_four_byte_varint(void) {
 	free(buf);
 }
 
+static void cycle8_two_frames_one_buffer(void) {
+	/* Two distinct frames in one buffer: an unreliable 2-byte payload
+	 * followed by a reliable 4-byte payload. Decode reads the first,
+	 * caller advances by `consumed`, decodes the second. */
+	uint8_t buf[64];
+	size_t cursor = 0, w = 0;
+	uint8_t a[] = { 0xCA, 0xFE };
+	uint8_t b[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_UNRELIABLE, a, sizeof(a),
+				buf + cursor, sizeof(buf) - cursor, &w) == WTD_FRAME_OK);
+	cursor += w;
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE, b, sizeof(b),
+				buf + cursor, sizeof(buf) - cursor, &w) == WTD_FRAME_OK);
+	cursor += w;
+
+	size_t pos = 0;
+	for (int i = 0; i < 2; i++) {
+		size_t consumed = 0;
+		uint8_t flag = 0;
+		const uint8_t *p = NULL;
+		size_t plen = 0;
+		EXPECT(wtd_frame_decode(buf + pos, cursor - pos,
+					&consumed, &flag, &p, &plen) == WTD_FRAME_OK);
+		if (i == 0) {
+			EXPECT(flag == WTD_FRAME_FLAG_UNRELIABLE);
+			EXPECT(plen == sizeof(a));
+			EXPECT(memcmp(p, a, sizeof(a)) == 0);
+		} else {
+			EXPECT(flag == WTD_FRAME_FLAG_RELIABLE);
+			EXPECT(plen == sizeof(b));
+			EXPECT(memcmp(p, b, sizeof(b)) == 0);
+		}
+		EXPECT(consumed > 0);
+		EXPECT(consumed <= cursor - pos);
+		pos += consumed;
+	}
+	/* After both frames, the cursor must land exactly at the end. */
+	EXPECT(pos == cursor);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -229,5 +273,6 @@ int main(void) {
 	cycle5_two_byte_varint();
 	cycle6_incomplete_two_byte_varint();
 	cycle7_four_byte_varint();
+	cycle8_two_frames_one_buffer();
 	return failures == 0 ? 0 : 1;
 }
