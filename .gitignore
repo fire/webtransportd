@@ -1,0 +1,11 @@
+# Test binaries auto-built by `make test`
+*_test
+*_test.dSYM/
+
+# Object files
+*.o
+*.obj
+
+# Editor / OS noise
+.DS_Store
+.vscode/
