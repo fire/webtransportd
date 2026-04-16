@@ -59,6 +59,9 @@ wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 	if ((flag & ~WTD_FRAME_FLAG_MASK) != 0) {
 		return WTD_FRAME_ERR_RESERVED;
 	}
+	if (payload_len > WTD_FRAME_MAX_PAYLOAD) {
+		return WTD_FRAME_ERR_TOO_BIG;
+	}
 	(void)out_size;
 	out[0] = flag;
 	size_t vlen = varint_encode((uint64_t)payload_len, out + 1);
@@ -83,6 +86,9 @@ wtd_frame_status_t wtd_frame_decode(const uint8_t *buf, size_t buf_len,
 	size_t vlen = varint_decode(buf + 1, buf_len - 1, &plen);
 	if (vlen == 0) {
 		return WTD_FRAME_INCOMPLETE; /* multi-byte varint is truncated */
+	}
+	if (plen > WTD_FRAME_MAX_PAYLOAD) {
+		return WTD_FRAME_ERR_TOO_BIG;
 	}
 	size_t total = 1 + vlen + (size_t)plen;
 	if (buf_len < total) {

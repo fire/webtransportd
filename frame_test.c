@@ -16,10 +16,15 @@
  *   varint range. Round-trip must still work, the on-wire length prefix
  *   must be the 4-byte form (top two bits = 0b10), and the ASAN-fenced
  *   incomplete-prefix coverage extends to this size.
- * - Cycle 8 (this addition): two frames packed back-to-back in the same
- *   buffer must each decode independently. `consumed` must report the
- *   exact length of the just-decoded frame (not the buffer), so the
- *   caller can advance and decode the next one.
+ * - Cycle 8: two frames packed back-to-back in the same buffer must each
+ *   decode independently. `consumed` must report the exact length of the
+ *   just-decoded frame (not the buffer), so the caller can advance and
+ *   decode the next one.
+ * - Cycle 9 (this addition): payload past WTD_FRAME_MAX_PAYLOAD is
+ *   rejected on encode, and decode refuses an on-wire frame whose
+ *   length-varint claims more than the cap (defends against an
+ *   attacker-crafted stream that would otherwise force a huge alloc on
+ *   the daemon's reader thread).
  */
 
 #include "frame.h"
@@ -265,6 +270,33 @@ static void cycle8_two_frames_one_buffer(void) {
 	EXPECT(pos == cursor);
 }
 
+static void cycle9_too_big(void) {
+	/* Encode side: refuse a payload past the cap (nothing is written, no
+	 * out_buf access — out_buf can be tiny / NULL-equivalent). */
+	uint8_t tiny[1];
+	size_t out_len = 99;
+	wtd_frame_status_t s = wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE,
+			tiny /* unused once we fail */, (size_t)WTD_FRAME_MAX_PAYLOAD + 1,
+			tiny, sizeof(tiny), &out_len);
+	EXPECT(s == WTD_FRAME_ERR_TOO_BIG);
+
+	/* Decode side: hand-craft an on-wire 4-byte-varint frame whose declared
+	 * length is past the cap. Decode must reject without trying to allocate
+	 * or read the payload bytes. */
+	uint8_t hdr[1 + 4];
+	hdr[0] = WTD_FRAME_FLAG_RELIABLE;
+	uint64_t big = (uint64_t)WTD_FRAME_MAX_PAYLOAD + 1;
+	hdr[1] = (uint8_t)(0x80 | (big >> 24));
+	hdr[2] = (uint8_t)((big >> 16) & 0xff);
+	hdr[3] = (uint8_t)((big >> 8) & 0xff);
+	hdr[4] = (uint8_t)(big & 0xff);
+	size_t consumed = 0;
+	uint8_t flag = 0;
+	const uint8_t *p = NULL;
+	size_t plen = 0;
+	EXPECT(wtd_frame_decode(hdr, sizeof(hdr), &consumed, &flag, &p, &plen) == WTD_FRAME_ERR_TOO_BIG);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -274,5 +306,6 @@ int main(void) {
 	cycle6_incomplete_two_byte_varint();
 	cycle7_four_byte_varint();
 	cycle8_two_frames_one_buffer();
+	cycle9_too_big();
 	return failures == 0 ? 0 : 1;
 }
