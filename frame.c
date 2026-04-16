@@ -12,14 +12,22 @@ static size_t varint_encode(uint64_t v, uint8_t *out) {
 		out[0] = (uint8_t)v;
 		return 1;
 	}
-	/* 2-byte form: 14-bit value, prefix 0b01. */
-	out[0] = (uint8_t)(0x40 | (v >> 8));
-	out[1] = (uint8_t)(v & 0xff);
-	return 2;
+	if (v < (1ull << 14)) {
+		/* 2-byte form: 14-bit value, prefix 0b01. */
+		out[0] = (uint8_t)(0x40 | (v >> 8));
+		out[1] = (uint8_t)(v & 0xff);
+		return 2;
+	}
+	/* 4-byte form: 30-bit value, prefix 0b10. */
+	out[0] = (uint8_t)(0x80 | (v >> 24));
+	out[1] = (uint8_t)((v >> 16) & 0xff);
+	out[2] = (uint8_t)((v >> 8) & 0xff);
+	out[3] = (uint8_t)(v & 0xff);
+	return 4;
 }
 
-/* Returns the number of bytes consumed (1 or 2), or 0 if `avail` is too
- * small to hold the indicated varint. Caller must check `avail >= 1`
+/* Returns the number of bytes consumed (1, 2, or 4), or 0 if `avail` is
+ * too small to hold the indicated varint. Caller must check `avail >= 1`
  * before calling so we can examine the prefix safely. */
 static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value) {
 	uint8_t prefix = buf[0] >> 6;
@@ -27,11 +35,22 @@ static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value)
 		*p_value = buf[0];
 		return 1;
 	}
-	if (avail < 2) {
+	if (prefix == 1) {
+		if (avail < 2) {
+			return 0;
+		}
+		*p_value = ((uint64_t)(buf[0] & 0x3f) << 8) | buf[1];
+		return 2;
+	}
+	/* prefix == 2: 4-byte form. */
+	if (avail < 4) {
 		return 0;
 	}
-	*p_value = ((uint64_t)(buf[0] & 0x3f) << 8) | buf[1];
-	return 2;
+	*p_value = ((uint64_t)(buf[0] & 0x3f) << 24)
+			| ((uint64_t)buf[1] << 16)
+			| ((uint64_t)buf[2] << 8)
+			| (uint64_t)buf[3];
+	return 4;
 }
 
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,

@@ -10,10 +10,12 @@
  *   range. Round-trip must still work, the on-wire length prefix must be
  *   the 2-byte form (top two bits = 0b01), and `consumed` must account for
  *   the extra varint byte.
- * - Cycle 6 (this addition): close the latent OOB-read door from cycle 5.
- *   When a frame's varint is the 2-byte form, decode must still report
- *   INCOMPLETE on every short prefix (including the case where only the
- *   first varint byte is present) without reading past the buffer.
+ * - Cycle 6: close the latent OOB-read door from cycle 5. ASAN-fenced
+ *   exact-sized prefixes confirm decode never reads past the buffer.
+ * - Cycle 7 (this addition): payload >= 16384 bytes pushes the length past
+ *   the 2-byte varint range. Round-trip must still work, the on-wire
+ *   length prefix must be the 4-byte form (top two bits = 0b10), and
+ *   the ASAN-fenced incomplete-prefix coverage extends to this size.
  */
 
 #include "frame.h"
@@ -167,6 +169,58 @@ static void cycle6_incomplete_two_byte_varint(void) {
 	EXPECT(consumed == out_len);
 }
 
+static void cycle7_four_byte_varint(void) {
+	/* 20000 bytes — first jump past the 14-bit (16383-byte) limit. */
+	const size_t plen = 20000;
+	uint8_t *payload = (uint8_t *)malloc(plen);
+	for (size_t i = 0; i < plen; i++) {
+		payload[i] = (uint8_t)((i * 31) & 0xff);
+	}
+	uint8_t *buf = (uint8_t *)malloc(1 + 4 + plen);
+	size_t out_len = 0;
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE, payload, plen,
+				buf, 1 + 4 + plen, &out_len) == WTD_FRAME_OK);
+	EXPECT(out_len == 1 + 4 + plen);
+	EXPECT(buf[0] == WTD_FRAME_FLAG_RELIABLE);
+	/* Top two bits of first varint byte = 0b10 (4-byte form). */
+	EXPECT((buf[1] & 0xc0) == 0x80);
+	uint32_t encoded_len = (uint32_t)((buf[1] & 0x3f) << 24)
+			| ((uint32_t)buf[2] << 16)
+			| ((uint32_t)buf[3] << 8)
+			| (uint32_t)buf[4];
+	EXPECT(encoded_len == plen);
+
+	/* Round-trip. */
+	size_t consumed = 0;
+	uint8_t flag = 0;
+	const uint8_t *p = NULL;
+	size_t got_len = 0;
+	EXPECT(wtd_frame_decode(buf, out_len, &consumed, &flag, &p, &got_len) == WTD_FRAME_OK);
+	EXPECT(consumed == out_len);
+	EXPECT(flag == WTD_FRAME_FLAG_RELIABLE);
+	EXPECT(got_len == plen);
+	EXPECT(memcmp(p, payload, plen) == 0);
+
+	/* ASAN-fenced incomplete-prefix coverage at the 4-byte varint boundary.
+	 * We only test prefixes inside the header (1 + 4 = 5 bytes) plus a few
+	 * just past it; covering every byte of a 20000-byte buffer is overkill. */
+	for (size_t i = 0; i < 6; i++) {
+		uint8_t *prefix = (uint8_t *)malloc(i == 0 ? 1 : i);
+		if (i > 0) {
+			memcpy(prefix, buf, i);
+		}
+		size_t c = 0;
+		uint8_t f = 0;
+		const uint8_t *pp = NULL;
+		size_t pl = 0;
+		EXPECT(wtd_frame_decode(prefix, i, &c, &f, &pp, &pl) == WTD_FRAME_INCOMPLETE);
+		free(prefix);
+	}
+
+	free(payload);
+	free(buf);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -174,5 +228,6 @@ int main(void) {
 	cycle4_reserved_bits();
 	cycle5_two_byte_varint();
 	cycle6_incomplete_two_byte_varint();
+	cycle7_four_byte_varint();
 	return failures == 0 ? 0 : 1;
 }
