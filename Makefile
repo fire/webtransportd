@@ -29,6 +29,18 @@ peer_session_test: peer_session_test.c peer_session.c peer_session.h frame.c fra
 	@echo "  CC     $@ (peer_session.c + frame.c + $<)"
 	$(CC) $(CFLAGS) -o $@ peer_session.c frame.c $< $(LDFLAGS)
 
+# Cycle 19-20: webtransportd binary. Only our own .c files — picoquic /
+# mbedtls / picotls wiring arrives in cycle 21+.
+webtransportd: webtransportd.c version.h
+	@echo "  CC     $@"
+	$(CC) $(CFLAGS) -o $@ webtransportd.c $(LDFLAGS)
+
+# version_test fork/execs ./webtransportd, so it needs that binary built
+# first. The test compiles standalone (no matching version.c).
+version_test: version_test.c version.h webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd)"
+	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
@@ -46,4 +58,4 @@ test: $(TESTS_BIN)
 	@echo "  OK     all tests passed"
 
 clean:
-	rm -f $(TESTS_BIN) *.o
+	rm -f $(TESTS_BIN) webtransportd *.o

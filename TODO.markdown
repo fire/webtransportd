@@ -20,9 +20,10 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `env`           | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist                                                                                |     ASAN+UBSAN     |
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
+|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version` (0.1.0-dev); smoke test fork/execs the daemon, checks exit 0, stdout non-empty, contains WTD_VERSION   |     ASAN+UBSAN     |
 |  ✅  | `thirdparty/`   | vendored mbedtls + picoquic + picotls (~24 MiB)                                                                                                     | (not yet compiled) |
 
-Five test binaries, all green:
+Six test binaries, all green:
 
 ```
 $ make test
@@ -31,18 +32,11 @@ $ make test
   RUN    ./frame_test
   RUN    ./log_test
   RUN    ./peer_session_test
+  RUN    ./version_test
   OK     all tests passed
 ```
 
 ## Next up
-
-### Cycle 19-20 — `webtransportd` main, `--version` smoke test
-
-- **RED**: `./webtransportd --version` prints a non-empty string and
-  exits 0.
-- **GREEN**: minimum `webtransportd.c` with argv parsing + version
-  constant. Makefile links it from our own `.c` files only (no
-  picoquic yet).
 
 ### Cycle 21+ — Real handshake, picoquic bootstrap, end-to-end echo
 

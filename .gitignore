@@ -2,6 +2,10 @@
 *_test
 *_test.dSYM/
 
+# Daemon binary
+/webtransportd
+/webtransportd.dSYM/
+
 # Object files
 *.o
 *.obj
