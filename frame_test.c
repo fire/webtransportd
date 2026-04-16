@@ -20,11 +20,13 @@
  *   decode independently. `consumed` must report the exact length of the
  *   just-decoded frame (not the buffer), so the caller can advance and
  *   decode the next one.
- * - Cycle 9 (this addition): payload past WTD_FRAME_MAX_PAYLOAD is
- *   rejected on encode, and decode refuses an on-wire frame whose
- *   length-varint claims more than the cap (defends against an
- *   attacker-crafted stream that would otherwise force a huge alloc on
- *   the daemon's reader thread).
+ * - Cycle 9: payload past WTD_FRAME_MAX_PAYLOAD is rejected on encode,
+ *   and decode refuses an on-wire frame whose length-varint claims more
+ *   than the cap (defends against an attacker-crafted stream that would
+ *   otherwise force a huge alloc on the daemon's reader thread).
+ * - Cycle 10 (this addition): encode refuses if the caller's output
+ *   buffer is smaller than the encoded frame would be — and does so
+ *   *without* writing a single byte to that buffer (ASAN-fenced).
  */
 
 #include "frame.h"
@@ -297,6 +299,28 @@ static void cycle9_too_big(void) {
 	EXPECT(wtd_frame_decode(hdr, sizeof(hdr), &consumed, &flag, &p, &plen) == WTD_FRAME_ERR_TOO_BIG);
 }
 
+static void cycle10_buf_too_small(void) {
+	/* Encoding "hi" reliable needs 4 bytes (flag + 1-byte varint + 2 payload).
+	 * Any out_size < 4 must be rejected. We malloc each buffer at exactly
+	 * the size we want to test so ASAN catches any over-write. */
+	uint8_t payload[] = { 'h', 'i' };
+	size_t needed = 4;
+	for (size_t sz = 0; sz < needed; sz++) {
+		uint8_t *out = (uint8_t *)malloc(sz == 0 ? 1 : sz);
+		size_t out_len = 99;
+		EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE, payload, sizeof(payload),
+					out, sz, &out_len) == WTD_FRAME_ERR_BUF_TOO_SMALL);
+		free(out);
+	}
+	/* Boundary: exactly `needed` bytes succeeds. */
+	uint8_t *out = (uint8_t *)malloc(needed);
+	size_t out_len = 0;
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE, payload, sizeof(payload),
+				out, needed, &out_len) == WTD_FRAME_OK);
+	EXPECT(out_len == needed);
+	free(out);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -307,5 +331,6 @@ int main(void) {
 	cycle7_four_byte_varint();
 	cycle8_two_frames_one_buffer();
 	cycle9_too_big();
+	cycle10_buf_too_small();
 	return failures == 0 ? 0 : 1;
 }

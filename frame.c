@@ -53,6 +53,15 @@ static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value)
 	return 4;
 }
 
+/* How many bytes a varint of value v will occupy (1, 2, or 4). Mirrors the
+ * branches in varint_encode without writing anything; lets us size-check
+ * the output buffer before touching it. */
+static size_t varint_size(uint64_t v) {
+	if (v < (1ull << 6)) return 1;
+	if (v < (1ull << 14)) return 2;
+	return 4;
+}
+
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 		const uint8_t *payload, size_t payload_len,
 		uint8_t *out, size_t out_size, size_t *p_out_len) {
@@ -62,11 +71,14 @@ wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 	if (payload_len > WTD_FRAME_MAX_PAYLOAD) {
 		return WTD_FRAME_ERR_TOO_BIG;
 	}
-	(void)out_size;
+	size_t needed = 1 + varint_size((uint64_t)payload_len) + payload_len;
+	if (out_size < needed) {
+		return WTD_FRAME_ERR_BUF_TOO_SMALL;
+	}
 	out[0] = flag;
 	size_t vlen = varint_encode((uint64_t)payload_len, out + 1);
 	memcpy(out + 1 + vlen, payload, payload_len);
-	*p_out_len = 1 + vlen + payload_len;
+	*p_out_len = needed;
 	return WTD_FRAME_OK;
 }
 
