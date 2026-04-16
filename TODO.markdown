@@ -13,14 +13,14 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 
 ## Status
 
-| Done | Module | Cycles / subject | Sanitizer |
-| :--: | ------ | ---------------- | :-------: |
-| ✅ | `frame` | 1-11: encode/decode, INCOMPLETE on prefix, reserved bits, 1/2/4-byte varints, MAX_PAYLOAD, BUF_TOO_SMALL, two-frames-one-buffer, public API settled | ASAN+UBSAN |
-| ✅ | `log` | 12: level filter, thread-safe stderr emit | ASAN+UBSAN |
-| ✅ | `env` | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist | ASAN+UBSAN |
-| ✅ | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap | ASAN+UBSAN |
-| ✅ | `peer_session` | 17: mutex-guarded FIFO work queue primitive | ASAN+UBSAN |
-| ✅ | `thirdparty/` | vendored mbedtls + picoquic + picotls (~24 MiB) | (not yet compiled) |
+| Done | Module          | Cycles / subject                                                                                                                                    |     Sanitizer      |
+| :--: | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------: |
+|  ✅  | `frame`         | 1-11: encode/decode, INCOMPLETE on prefix, reserved bits, 1/2/4-byte varints, MAX_PAYLOAD, BUF_TOO_SMALL, two-frames-one-buffer, public API settled |     ASAN+UBSAN     |
+|  ✅  | `log`           | 12: level filter, thread-safe stderr emit                                                                                                           |     ASAN+UBSAN     |
+|  ✅  | `env`           | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist                                                                                |     ASAN+UBSAN     |
+|  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
+|  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
+|  ✅  | `thirdparty/`   | vendored mbedtls + picoquic + picotls (~24 MiB)                                                                                                     | (not yet compiled) |
 
 Five test binaries, all green:
 
@@ -35,17 +35,6 @@ $ make test
 ```
 
 ## Next up
-
-### Cycle 18 — `peer_session`: reader thread parses frames out of child stdout
-
-- **RED**: spawn `/bin/echo` or a tiny helper that writes two framed
-  messages, start `wtd_peer_session_start_reader`, assert both frames
-  appear on the outbound work queue in order, with correct flags +
-  payloads.
-- **GREEN**: implement a per-peer reader thread that reads `stdout_fd`,
-  feeds bytes through `wtd_frame_decode` in a loop, pushes each
-  complete frame onto the queue, and invokes an `on_outbound_ready`
-  callback so the network thread wakes up.
 
 ### Cycle 19-20 — `webtransportd` main, `--version` smoke test
 

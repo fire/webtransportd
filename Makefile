@@ -8,8 +8,8 @@ CC      ?= cc
 # ASAN catches the latent OOB read that an "INCOMPLETE" decode could otherwise
 # get away with by accident. -fno-omit-frame-pointer keeps stack traces clean.
 CFLAGS  ?= -O0 -g -Wall -Wextra -Werror -std=c11 \
-           -fsanitize=address,undefined -fno-omit-frame-pointer
-LDFLAGS ?= -fsanitize=address,undefined
+           -fsanitize=address,undefined -fno-omit-frame-pointer -pthread
+LDFLAGS ?= -fsanitize=address,undefined -pthread
 
 TESTS_SRC := $(wildcard *_test.c)
 TESTS_BIN := $(TESTS_SRC:_test.c=_test)
@@ -21,6 +21,14 @@ TESTS_BIN := $(TESTS_SRC:_test.c=_test)
 # Match recipe pairs the test with its .c + .h so that editing the
 # implementation re-triggers a build. Fallback recipe handles tests that
 # need no matching source (header-only or fully self-contained).
+
+# peer_session links frame.c because the reader thread decodes wire frames
+# with wtd_frame_decode, and the test encodes the wire bytes it writes into
+# the pipe with wtd_frame_encode. Explicit rule wins over the %_test pattern.
+peer_session_test: peer_session_test.c peer_session.c peer_session.h frame.c frame.h
+	@echo "  CC     $@ (peer_session.c + frame.c + $<)"
+	$(CC) $(CFLAGS) -o $@ peer_session.c frame.c $< $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)

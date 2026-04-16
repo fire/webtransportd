@@ -8,8 +8,15 @@
  *     parsed by the per-peer reader thread, awaiting flush onto the
  *     cnx by the picoquic network thread.
  *
- * Only the work queue is wired up in this cycle; the rest grows as the
- * next tests demand it.
+ * Cycle 18 adds the reader thread: wtd_peer_session_start_reader
+ * spawns a pthread that read()s the supplied fd, feeds bytes through
+ * wtd_frame_decode, pushes each complete frame onto the work queue, and
+ * fires an on_outbound_ready callback so the network thread can wake
+ * up. The thread exits on EOF (read returns 0) or on a decode error.
+ *
+ * fd ownership stays with the caller: to shut the thread down, the
+ * caller must cause EOF on the fd (typically by closing the peer's
+ * write end), then call wtd_peer_session_stop_reader to join.
  */
 
 #ifndef WEBTRANSPORTD_PEER_SESSION_H
@@ -45,6 +52,33 @@ void wtd_work_queue_push(wtd_work_queue_t *q, wtd_outbound_frame_t *f);
 /* Atomically detach the whole list; caller owns every node and must
  * free() each one. Returns NULL if empty. */
 wtd_outbound_frame_t *wtd_work_queue_drain(wtd_work_queue_t *q);
+
+typedef void (*wtd_on_outbound_ready_fn)(void *ctx);
+
+typedef struct wtd_peer_session {
+	wtd_work_queue_t outbound;
+	pthread_t reader_thread;
+	int reader_thread_started;
+	int reader_fd;
+	wtd_on_outbound_ready_fn on_ready;
+	void *on_ready_ctx;
+} wtd_peer_session_t;
+
+void wtd_peer_session_init(wtd_peer_session_t *s);
+
+/* destroy() joins the reader thread if it is still running. The caller
+ * must first close the fd's producer side (or otherwise EOF it) or the
+ * thread will block forever in read(). */
+void wtd_peer_session_destroy(wtd_peer_session_t *s);
+
+/* Spawn the reader thread. Returns 0 on success, -errno on failure.
+ * fd is not closed by the session; the caller retains ownership. */
+int wtd_peer_session_start_reader(wtd_peer_session_t *s, int fd,
+		wtd_on_outbound_ready_fn on_ready, void *ctx);
+
+/* Join the reader thread. Caller must have already caused EOF on the
+ * fd (typically by close()ing the writer end) so the read() returns. */
+void wtd_peer_session_stop_reader(wtd_peer_session_t *s);
 
 #ifdef __cplusplus
 }
