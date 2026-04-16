@@ -41,6 +41,30 @@ version_test: version_test.c version.h webtransportd
 	@echo "  CC     $@ (smoke: execs ./webtransportd)"
 	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
 
+# Cycle 21a: minimal vendored-picoquic linkage. The include path uses
+# -isystem so our -Werror doesn't trip on picoquic.h; the vendored .c
+# files compile under VENDOR_CFLAGS which keeps sanitizers on but drops
+# -Werror (they are not our source to clean). Wider picoquic build
+# expands on demand in later cycles.
+PICOQUIC_ISYSTEM := -isystem thirdparty/picoquic/picoquic
+PICOQUIC_DEFS := \
+    -DPICOQUIC_WITH_MBEDTLS=1 \
+    -DPTLS_WITHOUT_OPENSSL=1 \
+    -DPTLS_WITHOUT_FUSION=1 \
+    -DDISABLE_DEBUG_PRINTF=1
+VENDOR_CFLAGS := -O0 -g -std=c11 -w -pthread \
+                 -fsanitize=address,undefined -fno-omit-frame-pointer \
+                 $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS)
+
+error_names.o: thirdparty/picoquic/picoquic/error_names.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+picoquic_link_test: picoquic_link_test.c error_names.o
+	@echo "  CC     $@"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ picoquic_link_test.c error_names.o $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)

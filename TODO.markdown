@@ -21,9 +21,9 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
 |  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version` (0.1.0-dev); smoke test fork/execs the daemon, checks exit 0, stdout non-empty, contains WTD_VERSION   |     ASAN+UBSAN     |
-|  ✅  | `thirdparty/`   | vendored mbedtls + picoquic + picotls (~24 MiB)                                                                                                     | (not yet compiled) |
+|  ✅  | `thirdparty/`   | 21a: minimal picoquic linkage (`error_names.c` compiles under our flags; `picoquic_error_name(INTERNAL_ERROR)` returns `"internal"`)                |     ASAN+UBSAN     |
 
-Six test binaries, all green:
+Seven test binaries, all green:
 
 ```
 $ make test
@@ -32,6 +32,7 @@ $ make test
   RUN    ./frame_test
   RUN    ./log_test
   RUN    ./peer_session_test
+  RUN    ./picoquic_link_test
   RUN    ./version_test
   OK     all tests passed
 ```
@@ -40,28 +41,40 @@ $ make test
 
 ### Cycle 21+ — Real handshake, picoquic bootstrap, end-to-end echo
 
-- **RED**: `handshake_test` drives a picoquic-based client against the
-  daemon and asserts a WebTransport CONNECT reaches
+Cycle 21 from the original plan was too fat. Split into sub-cycles,
+each driven by one failing test:
+
+- ✅ **21a (done)**: vendored `error_names.c` compiles with
+  `-isystem thirdparty/picoquic/picoquic` and the four Godot-style
+  defines (`PICOQUIC_WITH_MBEDTLS`, `PTLS_WITHOUT_OPENSSL`,
+  `PTLS_WITHOUT_FUSION`, `DISABLE_DEBUG_PRINTF`). Vendored TUs use
+  `-w` (sanitizers still on) so their warnings don't stop our
+  `-Werror` build.
+- **21b**: compile all of `thirdparty/picoquic/picoquic/*.c` and
+  `thirdparty/picoquic/picohttp/*.c`; RED is a test that calls
+  `picoquic_create(...)` with NULL ticket/token funcs and asserts it
+  returns non-NULL (proves the internal TUs link as a library).
+- **21c**: add `thirdparty/picotls/lib/*.c` +
+  `thirdparty/picoquic/picoquic_mbedtls/*.c` +
+  `thirdparty/mbedtls/library/*.c`. RED: `picoquic_create` with a
+  real mbedtls-backed TLS context initialises without crashing.
+- **21d (handshake)**: `handshake_test` drives a picoquic client
+  against the daemon and asserts a WebTransport CONNECT reaches
   `picoquic_state_server_ready`.
-- **GREEN (build)**: wire vendored `thirdparty/picoquic/**/*.c`,
-  `thirdparty/picotls/lib/*.c`, `thirdparty/mbedtls/library/*.c` into
-  the Makefile. Same preprocessor flags as Godot's `modules/http3/SCsub`:
-  `PICOQUIC_WITH_MBEDTLS`, `PTLS_WITHOUT_OPENSSL`, `PTLS_WITHOUT_FUSION`,
-  `DISABLE_DEBUG_PRINTF`. Links only `-lpthread`.
-- **GREEN (bootstrap)**: `picoquic_create` with server cert+key (or
+- **21e (bootstrap)**: `picoquic_create` with server cert+key (or
   `--cert=auto` self-signed), `picoquic_set_alpn_select_fn_v2`,
   `picowt_set_default_transport_parameters`,
   `picoquic_start_network_thread`.
-- **GREEN (path callback)**: register `_wt_session_path_callback` that
+- **21f (path callback)**: register `_wt_session_path_callback` that
   on CONNECT exec's the configured child, allocates a `peer_session_t`,
   stores it in `path_callback_ctx`, and wires incoming stream/datagram
   frames to the child's stdin via the framing codec.
-- **RED**: end-to-end echo test — the client sends a datagram + a
-  stream message; the daemon pipes both through `/bin/cat` (or a
+- **21g (echo)**: end-to-end echo test — the client sends a datagram
+  + a stream message; the daemon pipes both through `/bin/cat` (or a
   small echo helper); the client receives identical bytes back in the
-  same mode (unreliable ↔ unreliable, reliable ↔ reliable).
-- **GREEN**: drain the per-peer outbound work queue from the picoquic
-  loop callback on `picoquic_packet_loop_wake_up` and dispatch to
+  same mode (unreliable ↔ unreliable, reliable ↔ reliable). GREEN
+  drains the per-peer outbound work queue from the picoquic loop
+  callback on `picoquic_packet_loop_wake_up` and dispatches to
   `picoquic_add_to_stream` / `picoquic_queue_datagram_frame`.
 
 ### Cycle N — Graceful shutdown
