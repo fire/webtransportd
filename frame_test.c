@@ -1,9 +1,11 @@
 /* TDD log:
  * - Cycle 1: encode "hi" reliable, expect [0x00, 0x02, 'h', 'i'].
  * - Cycle 2: decode round-trips the same bytes back to flag + payload.
- * - Cycle 3 (this addition): decode reports WTD_FRAME_INCOMPLETE for every
- *   short prefix of a valid frame (caller will accumulate more bytes and
- *   retry). On the full frame, status flips back to OK.
+ * - Cycle 3: decode reports WTD_FRAME_INCOMPLETE for every short prefix of
+ *   a valid frame; the full frame flips back to OK.
+ * - Cycle 4 (this addition): only bit 0 of the flag byte is meaningful.
+ *   Encode rejects flags with any reserved bit set; decode rejects frames
+ *   on the wire that have any reserved bit set.
  */
 
 #include "frame.h"
@@ -67,9 +69,35 @@ static void cycle3_incomplete_prefixes(void) {
 	EXPECT(consumed == out_len);
 }
 
+static void cycle4_reserved_bits(void) {
+	/* Encode side: any flag bit other than bit 0 is rejected. */
+	uint8_t buf[8];
+	size_t out_len = 0;
+	uint8_t payload[] = { 'x' };
+	EXPECT(wtd_frame_encode(0x02 /* reserved bit set */, payload, sizeof(payload),
+				buf, sizeof(buf), &out_len) == WTD_FRAME_ERR_RESERVED);
+	EXPECT(wtd_frame_encode(0x80, payload, sizeof(payload),
+				buf, sizeof(buf), &out_len) == WTD_FRAME_ERR_RESERVED);
+
+	/* Decode side: an attacker-crafted byte stream with reserved bits is rejected. */
+	uint8_t bad[] = { 0x80 /* reserved bit */, 0x01, 'x' };
+	size_t consumed = 0;
+	uint8_t flag = 0;
+	const uint8_t *p = NULL;
+	size_t plen = 0;
+	EXPECT(wtd_frame_decode(bad, sizeof(bad), &consumed, &flag, &p, &plen) == WTD_FRAME_ERR_RESERVED);
+
+	/* Sanity: bit 0 alone (= unreliable) is still accepted on encode. */
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_UNRELIABLE, payload, sizeof(payload),
+				buf, sizeof(buf), &out_len) == WTD_FRAME_OK);
+	EXPECT(out_len == 3);
+	EXPECT(buf[0] == 0x01);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
 	cycle3_incomplete_prefixes();
+	cycle4_reserved_bits();
 	return failures == 0 ? 0 : 1;
 }

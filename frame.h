@@ -4,11 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define WTD_FRAME_FLAG_RELIABLE 0x00
+#define WTD_FRAME_FLAG_RELIABLE   0x00
+#define WTD_FRAME_FLAG_UNRELIABLE 0x01
+#define WTD_FRAME_FLAG_MASK       0x01 /* bit 0 only; bits 1-7 reserved */
 
 typedef enum wtd_frame_status {
 	WTD_FRAME_OK = 0,
-	WTD_FRAME_INCOMPLETE = 1, /* not enough bytes yet; caller should retry */
+	WTD_FRAME_INCOMPLETE = 1,    /* not enough bytes yet; caller should retry */
+	WTD_FRAME_ERR_RESERVED = -1, /* a reserved flag bit was set */
 } wtd_frame_status_t;
 
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,

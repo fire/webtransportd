@@ -13,15 +13,18 @@ TESTS_BIN := $(TESTS_SRC:_test.c=_test)
 
 # Source files for the unit-under-test live next to the test that exercises
 # them: e.g. frame_test.c links frame.c. We discover this by stripping `_test`
-# from each test name and looking for a matching .c.
+# from each test name and looking for a matching .c (and .h).
+#
+# Match recipe pairs the test with its .c + .h so that editing the
+# implementation re-triggers a build. Fallback recipe handles tests that
+# need no matching source (header-only or fully self-contained).
+%_test: %_test.c %.c %.h
+	@echo "  CC     $@ ($*.c + $<)"
+	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
+
 %_test: %_test.c
-	@if [ -f $*.c ]; then \
-		echo "  CC     $@ ($*.c + $<)"; \
-		$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS); \
-	else \
-		echo "  CC     $@ (header-only or self-contained)"; \
-		$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS); \
-	fi
+	@echo "  CC     $@ (self-contained)"
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 .PHONY: test clean
 test: $(TESTS_BIN)

@@ -17,6 +17,9 @@ static size_t varint_decode(const uint8_t *buf, uint64_t *p_value) {
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 		const uint8_t *payload, size_t payload_len,
 		uint8_t *out, size_t out_size, size_t *p_out_len) {
+	if ((flag & ~WTD_FRAME_FLAG_MASK) != 0) {
+		return WTD_FRAME_ERR_RESERVED;
+	}
 	(void)out_size;
 	out[0] = flag;
 	size_t vlen = varint_encode((uint64_t)payload_len, out + 1);
@@ -30,6 +33,9 @@ wtd_frame_status_t wtd_frame_decode(const uint8_t *buf, size_t buf_len,
 		const uint8_t **p_payload, size_t *p_payload_len) {
 	if (buf_len < 1) {
 		return WTD_FRAME_INCOMPLETE; /* need flag byte */
+	}
+	if ((buf[0] & ~WTD_FRAME_FLAG_MASK) != 0) {
+		return WTD_FRAME_ERR_RESERVED;
 	}
 	if (buf_len < 2) {
 		return WTD_FRAME_INCOMPLETE; /* need at least 1 varint byte */
