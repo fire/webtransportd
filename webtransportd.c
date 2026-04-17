@@ -30,6 +30,10 @@
  * datagram frames bytes with flag=1 and writes them to the child;
  * drain_outbound routes flag=1 frames to picoquic_queue_datagram_
  * frame instead of picoquic_add_to_stream.
+ * Cycle 23: a small forwarder thread reads the child's stderr_fd
+ * and emits each chunk to the daemon's own stderr, prefixed with
+ * "child stderr: ". Previously stderr_fd was opened by
+ * wtd_child_spawn but never read.
  */
 
 #include "version.h"
@@ -41,6 +45,7 @@
 #include "picoquic_packet_loop.h"
 
 #include <errno.h>
+#include <pthread.h>
 
 #include <signal.h>
 #include <stdatomic.h>
@@ -79,6 +84,52 @@ static int cmd_selftest(void) {
 	return 0;
 }
 
+/* Cycle 23: child-stderr forwarder. A dedicated pthread reads from
+ * child.stderr_fd and emits each chunk to the daemon's own stderr.
+ * Exits on read() returning 0 (EOF, fired when wtd_child_terminate
+ * closes the fd) or an error; stderr_fwd_stop joins it afterwards. */
+typedef struct {
+	pthread_t thread;
+	int fd;
+	int started;
+} stderr_fwd_t;
+
+static void *stderr_fwd_loop(void *arg) {
+	stderr_fwd_t *f = (stderr_fwd_t *)arg;
+	char buf[512];
+	for (;;) {
+		ssize_t n = read(f->fd, buf, sizeof(buf) - 1);
+		if (n > 0) {
+			buf[n] = '\0';
+			fprintf(stderr, "child stderr: %.*s", (int)n, buf);
+			fflush(stderr);
+		} else if (n < 0 && errno == EINTR) {
+			continue;
+		} else {
+			break; /* EOF or hard error */
+		}
+	}
+	return NULL;
+}
+
+static int stderr_fwd_start(stderr_fwd_t *f, int fd) {
+	f->fd = fd;
+	f->started = 0;
+	int rc = pthread_create(&f->thread, NULL, stderr_fwd_loop, f);
+	if (rc != 0) {
+		return -rc;
+	}
+	f->started = 1;
+	return 0;
+}
+
+static void stderr_fwd_stop(stderr_fwd_t *f) {
+	if (f->started) {
+		(void)pthread_join(f->thread, NULL);
+		f->started = 0;
+	}
+}
+
 typedef struct {
 	int client_reached_ready;
 	uint64_t ready_at_us;
@@ -88,6 +139,7 @@ typedef struct {
 	wtd_peer_session_t peer;
 	int peer_initialised;
 	int reader_started;
+	stderr_fwd_t stderr_fwd;
 	atomic_int frames_pending;
 	/* Cycle 22d: the (cnx, stream_id) pair the current payload came
 	 * in on. Set by server_stream_cb, consumed by drain_outbound to
@@ -255,6 +307,9 @@ static int server_loop_cb(picoquic_quic_t *quic,
 									"webtransportd: start_reader rc=%d\n",
 									rr);
 						}
+						/* Cycle 23: start stderr forwarder. */
+						(void)stderr_fwd_start(&ctx->stderr_fwd,
+								ctx->child.stderr_fd);
 					} else {
 						fprintf(stderr,
 								"webtransportd: child_spawn(%s) rc=%d\n",
@@ -324,13 +379,15 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
 
-	/* Closing the child's stdin/stdout side (via wtd_child_terminate)
-	 * gives the reader thread's blocking read() an EOF so it exits;
-	 * then wtd_peer_session_destroy joins it and drains the queue.
-	 * Ordering: terminate child first, then destroy peer session. */
+	/* Closing the child's stdin/stdout/stderr (via wtd_child_terminate)
+	 * gives the reader + stderr-forwarder threads' blocking read()s
+	 * an EOF so they exit; then the *_stop/_destroy calls join them
+	 * and drain queues. Ordering: terminate child first so all three
+	 * pipe fds close simultaneously, then tear down the consumers. */
 	if (sctx.child_spawned) {
 		wtd_child_terminate(&sctx.child);
 	}
+	stderr_fwd_stop(&sctx.stderr_fwd);
 	if (sctx.peer_initialised) {
 		drain_outbound(&sctx); /* last flush of anything buffered */
 		wtd_peer_session_destroy(&sctx.peer);

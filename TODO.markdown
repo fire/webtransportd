@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–22e | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–23  | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
 All work lives in one directory under ASAN+UBSAN. 12 test binaries green:
 
@@ -131,6 +131,15 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `handshake_echo_test` sends both `"world"` on stream 0 and
   `"dgram"` as a datagram, then asserts both come back on their
   respective channels. Mutation-tested on the datagram memcmp.
+- **23** — **child stderr forwarding.** A small dedicated pthread
+  reads the child's `stderr_fd` and emits every chunk to the
+  daemon's own stderr, prefixed `child stderr: `. Previously the
+  fd was opened by `wtd_child_spawn` and left unread (documented
+  under Future cycles). `examples/frame_hi` now also writes
+  `oops\n` to stderr before the frame; `handshake_socket_test`
+  `dup2`s the daemon's stdout+stderr into one pipe and asserts
+  `child stderr: oops` shows up alongside the prior 22b frame
+  sentinel. Mutation-tested on the stderr assertion.
 
 ## Next up
 
@@ -208,7 +217,6 @@ loop with one exit path.
 - 8-byte varint support + configurable `WTD_FRAME_MAX_PAYLOAD` so
   large reliable payloads don't force session close.
 - Real `child_process_win.c` (today's impl is POSIX-only).
-- Forward child `stderr_fd` to `wtd_log` (currently opened but unread).
 - `--dir` / `--staticdir` — serve static files on non-WT paths for
   devconsole, mirroring websocketd's `http.go`.
 

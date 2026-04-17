@@ -13,15 +13,17 @@
  *   ready. Proves child_process.c is wired into the real server
  *   pipeline (spawned on demand, reaped on shutdown, ASAN-clean).
  *
- * - Cycle 22b (this commit): --exec=examples/frame_hi — a tiny helper
- *   that writes one framed message (flag=0, payload="hi") and exits.
- *   The daemon's wtd_peer_session reader thread reads it off the
- *   child's stdout_fd, decodes it with wtd_frame_decode, pushes it
- *   onto the outbound work queue, and the packet-loop callback
- *   drains the queue on each iteration, printing
- *   "outbound frame: flag=0 len=2 payload=hi". This test asserts
- *   that sentinel shows up, proving the whole child→daemon decode
- *   path works end-to-end inside the real server.
+ * - Cycle 22b: --exec=examples/frame_hi — a tiny helper that writes
+ *   one framed message (flag=0, payload="hi") and exits. Daemon's
+ *   wtd_peer_session reader decodes it and the packet-loop callback
+ *   prints "outbound frame: flag=0 len=2 payload=hi".
+ *
+ * - Cycle 23 (this commit): frame_hi also writes "oops\n" to stderr
+ *   before the frame. The daemon's stderr forwarder thread reads
+ *   the child's stderr_fd and emits "child stderr: oops" on the
+ *   daemon's own stderr. This test dup2()s the daemon's stdout and
+ *   stderr onto the same pipe so one drain sees both channels, then
+ *   asserts the forwarded sentinel in addition to the 22b one.
  */
 
 #include "picoquic.h"
@@ -98,7 +100,11 @@ static int spawn_daemon(daemon_t *out, uint16_t port, const char *exec_path) {
 		return -1;
 	}
 	if (pid == 0) {
+		/* Merge daemon stdout + stderr into the same pipe so the
+		 * test's drain picks up both channels (cycle 23: the
+		 * stderr forwarder emits to daemon stderr). */
 		(void)dup2(fds[1], STDOUT_FILENO);
+		(void)dup2(fds[1], STDERR_FILENO);
 		close(fds[0]);
 		close(fds[1]);
 		char port_buf[32];
@@ -317,6 +323,7 @@ int main(void) {
 	EXPECT(strstr(log, "client reached ready") != NULL);
 	EXPECT(strstr(log, "child spawned pid=") != NULL);
 	EXPECT(strstr(log, "outbound frame: flag=0 len=2 payload=hi") != NULL);
+	EXPECT(strstr(log, "child stderr: oops") != NULL);
 
 	int status = 0;
 	kill_and_reap(&d, &status);
