@@ -4,10 +4,11 @@
 
 /* QUIC-style varint (RFC 9000 §16). Top two bits of the first byte select
  * the encoded length: 0b00=1 byte, 0b01=2 bytes, 0b10=4 bytes, 0b11=8 bytes.
- * The remaining bits hold the value, big-endian. We currently widen up to
- * the 2-byte form (max value 16383); the 4-byte form will be added in a
- * later cycle when a test demands it. */
-static size_t varint_encode(uint64_t v, uint8_t *out) {
+ * The remaining bits hold the value, big-endian. The encoder picks the
+ * shortest form that fits v. Values >= 2^62 return 0 (QUIC varints do
+ * not encode beyond 62 bits) — the caller (wtd_frame_encode) already
+ * caps at WTD_FRAME_MAX_PAYLOAD so this branch is defensive. */
+size_t wtd_frame_encode_varint(uint64_t v, uint8_t *out) {
 	if (v < (1ull << 6)) {
 		out[0] = (uint8_t)v;
 		return 1;
@@ -18,12 +19,30 @@ static size_t varint_encode(uint64_t v, uint8_t *out) {
 		out[1] = (uint8_t)(v & 0xff);
 		return 2;
 	}
-	/* 4-byte form: 30-bit value, prefix 0b10. */
-	out[0] = (uint8_t)(0x80 | (v >> 24));
-	out[1] = (uint8_t)((v >> 16) & 0xff);
-	out[2] = (uint8_t)((v >> 8) & 0xff);
-	out[3] = (uint8_t)(v & 0xff);
-	return 4;
+	if (v < (1ull << 30)) {
+		/* 4-byte form: 30-bit value, prefix 0b10. */
+		out[0] = (uint8_t)(0x80 | (v >> 24));
+		out[1] = (uint8_t)((v >> 16) & 0xff);
+		out[2] = (uint8_t)((v >> 8) & 0xff);
+		out[3] = (uint8_t)(v & 0xff);
+		return 4;
+	}
+	if (v < (1ull << 62)) {
+		/* 8-byte form: 62-bit value, prefix 0b11. Mirrors the decoder
+		 * branch added in cycle 25. Never fires in production today
+		 * (WTD_FRAME_MAX_PAYLOAD < 2^30) but covers interop with a
+		 * peer that happens to emit a prefix-3 length. */
+		out[0] = (uint8_t)(0xc0 | (v >> 56));
+		out[1] = (uint8_t)((v >> 48) & 0xff);
+		out[2] = (uint8_t)((v >> 40) & 0xff);
+		out[3] = (uint8_t)((v >> 32) & 0xff);
+		out[4] = (uint8_t)((v >> 24) & 0xff);
+		out[5] = (uint8_t)((v >> 16) & 0xff);
+		out[6] = (uint8_t)((v >> 8) & 0xff);
+		out[7] = (uint8_t)(v & 0xff);
+		return 8;
+	}
+	return 0;
 }
 
 /* Returns the number of bytes consumed (1, 2, 4, or 8), or 0 if `avail`
@@ -72,13 +91,14 @@ static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value)
 	return 8;
 }
 
-/* How many bytes a varint of value v will occupy (1, 2, or 4). Mirrors the
- * branches in varint_encode without writing anything; lets us size-check
- * the output buffer before touching it. */
+/* How many bytes a varint of value v will occupy (1, 2, 4, or 8).
+ * Mirrors the branches in wtd_frame_encode_varint without writing
+ * anything; lets us size-check the output buffer before touching it. */
 static size_t varint_size(uint64_t v) {
 	if (v < (1ull << 6)) return 1;
 	if (v < (1ull << 14)) return 2;
-	return 4;
+	if (v < (1ull << 30)) return 4;
+	return 8;
 }
 
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,
@@ -95,7 +115,7 @@ wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 		return WTD_FRAME_ERR_BUF_TOO_SMALL;
 	}
 	out[0] = flag;
-	size_t vlen = varint_encode((uint64_t)payload_len, out + 1);
+	size_t vlen = wtd_frame_encode_varint((uint64_t)payload_len, out + 1);
 	memcpy(out + 1 + vlen, payload, payload_len);
 	*p_out_len = needed;
 	return WTD_FRAME_OK;

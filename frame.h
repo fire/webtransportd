@@ -32,9 +32,9 @@ extern "C" {
 
 /* Hard cap on payload size in a single frame. Bounds memory the daemon's
  * per-peer reader thread might allocate when it sees an attacker-crafted
- * length-varint. 1 MiB comfortably exceeds typical UDP framing while
- * keeping per-session memory bounded. */
-#define WTD_FRAME_MAX_PAYLOAD (1u << 20)
+ * length-varint. 16 MiB comfortably exceeds a typical HTTP/3 request body
+ * or media keyframe while keeping per-session memory bounded. */
+#define WTD_FRAME_MAX_PAYLOAD (1u << 24)
 
 typedef enum wtd_frame_status {
 	WTD_FRAME_OK = 0,
@@ -51,6 +51,18 @@ typedef enum wtd_frame_status {
 wtd_frame_status_t wtd_frame_encode(uint8_t flag,
 		const uint8_t *payload, size_t payload_len,
 		uint8_t *out, size_t out_size, size_t *p_out_len);
+
+/* Encode a QUIC-style varint into out (assumed large enough: up to 8
+ * bytes). Returns the number of bytes written. The encoder always
+ * picks the shortest form: 1 byte for v < 2^6, 2 bytes for < 2^14,
+ * 4 bytes for < 2^30, 8 bytes for < 2^62. v >= 2^62 aborts via
+ * assert/returns 0 (QUIC varints don't encode beyond 62 bits).
+ *
+ * This symbol is exported only so the unit test can probe the
+ * prefix-3 (8-byte) branch without a 2^30+-byte payload. Production
+ * callers should use wtd_frame_encode — which selects this helper
+ * internally and enforces WTD_FRAME_MAX_PAYLOAD. */
+size_t wtd_frame_encode_varint(uint64_t v, uint8_t *out);
 
 /* Try to decode one frame from buf[0..buf_len). On WTD_FRAME_OK sets
  * *p_consumed to the number of bytes consumed (the caller should

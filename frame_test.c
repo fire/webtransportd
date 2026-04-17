@@ -384,6 +384,105 @@ static void cycle25_eight_byte_varint(void) {
 				&c3, &f3, &p3, &pl3) == WTD_FRAME_INCOMPLETE);
 }
 
+static void cycle41_eight_byte_varint_encode(void) {
+	/* Cycle 41: the encoder now emits the 8-byte (prefix-3) form for
+	 * values >= 2^30 — up to 2^62 - 1, the QUIC varint limit. Test
+	 * the encoder directly via wtd_frame_encode_varint so we don't
+	 * need a 1 GiB payload buffer; frame_fuzz_test exercises the
+	 * shorter-form paths on random inputs elsewhere. */
+	uint8_t out[8];
+
+	/* 1<<30: smallest value that trips prefix 3. */
+	size_t n = wtd_frame_encode_varint(1ull << 30, out);
+	EXPECT(n == 8);
+	EXPECT((out[0] >> 6) == 3);
+	/* Low 62 bits should decode back to 1<<30. */
+	uint64_t v = ((uint64_t)(out[0] & 0x3f) << 56)
+			| ((uint64_t)out[1] << 48) | ((uint64_t)out[2] << 40)
+			| ((uint64_t)out[3] << 32) | ((uint64_t)out[4] << 24)
+			| ((uint64_t)out[5] << 16) | ((uint64_t)out[6] << 8)
+			| (uint64_t)out[7];
+	EXPECT(v == (1ull << 30));
+
+	/* 1<<40 lands in the middle of the 8-byte range; verify the
+	 * high bits are placed correctly. */
+	n = wtd_frame_encode_varint(1ull << 40, out);
+	EXPECT(n == 8);
+	EXPECT((out[0] >> 6) == 3);
+	uint64_t v2 = ((uint64_t)(out[0] & 0x3f) << 56)
+			| ((uint64_t)out[1] << 48) | ((uint64_t)out[2] << 40)
+			| ((uint64_t)out[3] << 32) | ((uint64_t)out[4] << 24)
+			| ((uint64_t)out[5] << 16) | ((uint64_t)out[6] << 8)
+			| (uint64_t)out[7];
+	EXPECT(v2 == (1ull << 40));
+
+	/* Max encodable: 2^62 - 1. All 62 value bits set; prefix still 3. */
+	uint64_t max = (1ull << 62) - 1;
+	n = wtd_frame_encode_varint(max, out);
+	EXPECT(n == 8);
+	EXPECT((out[0] >> 6) == 3);
+	EXPECT(out[0] == 0xff); /* 0xc0 prefix | 0x3f high bits */
+	EXPECT(out[7] == 0xff);
+
+	/* Values at/above 2^62 are outside QUIC's varint range; encoder
+	 * returns 0. wtd_frame_encode caps at WTD_FRAME_MAX_PAYLOAD
+	 * before this branch fires in production. */
+	n = wtd_frame_encode_varint(1ull << 62, out);
+	EXPECT(n == 0);
+}
+
+static void cycle41_max_payload_is_16mib(void) {
+	/* WTD_FRAME_MAX_PAYLOAD bumped from 1 MiB to 16 MiB in cycle 41.
+	 * This is an observable invariant — guard it so a future regression
+	 * that silently lowers the cap trips immediately. */
+	EXPECT(WTD_FRAME_MAX_PAYLOAD == (1u << 24));
+}
+
+static void cycle41_round_trip_16mib(void) {
+	/* End-to-end: encode + decode a WTD_FRAME_MAX_PAYLOAD-sized
+	 * payload. Uses a 4-byte varint on the wire (16 MiB < 2^30). ASAN
+	 * keeps us honest about bounds. 16 MiB under libasan is ~80 MiB
+	 * of shadow memory on POSIX — well within CI-runner memory. */
+	size_t n = WTD_FRAME_MAX_PAYLOAD;
+	uint8_t *payload = (uint8_t *)malloc(n);
+	EXPECT(payload != NULL);
+	if (payload == NULL) {
+		return;
+	}
+	for (size_t i = 0; i < n; i++) {
+		payload[i] = (uint8_t)(i * 1103515245u + 12345u); /* cheap PRNG */
+	}
+
+	size_t wire_cap = 1 + 4 + n;
+	uint8_t *wire = (uint8_t *)malloc(wire_cap);
+	EXPECT(wire != NULL);
+	if (wire == NULL) {
+		free(payload);
+		return;
+	}
+
+	size_t wire_len = 0;
+	EXPECT(wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE,
+			payload, n, wire, wire_cap, &wire_len) == WTD_FRAME_OK);
+	EXPECT(wire_len == 1 + 4 + n);
+	/* On-wire length prefix is the 4-byte form (16 MiB < 2^30). */
+	EXPECT((wire[1] >> 6) == 2);
+
+	size_t consumed = 0;
+	uint8_t flag = 0;
+	const uint8_t *p = NULL;
+	size_t plen = 0;
+	EXPECT(wtd_frame_decode(wire, wire_len,
+			&consumed, &flag, &p, &plen) == WTD_FRAME_OK);
+	EXPECT(consumed == wire_len);
+	EXPECT(flag == WTD_FRAME_FLAG_RELIABLE);
+	EXPECT(plen == n);
+	EXPECT(memcmp(p, payload, n) == 0);
+
+	free(wire);
+	free(payload);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -396,5 +495,8 @@ int main(void) {
 	cycle9_too_big();
 	cycle10_buf_too_small();
 	cycle25_eight_byte_varint();
+	cycle41_eight_byte_varint_encode();
+	cycle41_max_payload_is_16mib();
+	cycle41_round_trip_16mib();
 	return failures == 0 ? 0 : 1;
 }
