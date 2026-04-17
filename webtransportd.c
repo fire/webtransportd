@@ -450,6 +450,83 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	return 0;
 }
 
+/* WebTransport path handler for /wt CONNECT requests.
+ * Called when h3zero receives HTTP/3 stream data for the /wt path.
+ * Routes WebTransport data to the child process peer_session. */
+static int wtd_wt_path_callback(picoquic_cnx_t *cnx, uint8_t *bytes,
+		size_t length, picohttp_call_back_event_t event,
+		struct st_h3zero_stream_ctx_t *stream_ctx_unused, void *path_app_ctx) {
+	(void)stream_ctx_unused;
+	server_ctx_t *sctx = (server_ctx_t *)path_app_ctx;
+	if (sctx == NULL) {
+		return -1;
+	}
+
+	/* Find or create the peer for this connection. */
+	wtd_peer_t *peer = NULL;
+	for (wtd_peer_t *p = sctx->peers; p != NULL; p = p->next) {
+		if (p->cnx == cnx) {
+			peer = p;
+			break;
+		}
+	}
+	if (peer == NULL && (event == picohttp_callback_post_data ||
+					event == picohttp_callback_post_fin)) {
+		/* Create a new peer for this connection. */
+		peer = (wtd_peer_t *)malloc(sizeof(wtd_peer_t));
+		if (peer == NULL) {
+			return -1;
+		}
+		memset(peer, 0, sizeof(*peer));
+		peer->cnx = cnx;
+
+		/* Spawn the child process. */
+		const char *argv[] = { sctx->exec_path, NULL };
+		if (wtd_child_spawn(argv, NULL, &peer->child) != 0) {
+			free(peer);
+			return -1;
+		}
+		peer->child_spawned = 1;
+
+		/* Set up peer_session reader for the child's stdout. */
+		wtd_peer_session_init(&peer->peer_session);
+		if (wtd_peer_session_start_reader(&peer->peer_session,
+				peer->child.stdout_fd, on_outbound_ready, peer) != 0) {
+			wtd_child_terminate(&peer->child);
+			peer->child_spawned = 0;
+			free(peer);
+			return -1;
+		}
+		peer->peer_initialised = 1;
+
+		peer->next = sctx->peers;
+		sctx->peers = peer;
+	}
+	if (peer == NULL) {
+		return 0;
+	}
+
+	/* Route WebTransport data through the child's stdin. */
+	if (event == picohttp_callback_post_data || event == picohttp_callback_post_fin) {
+		if (length > 0) {
+			uint8_t flag = (event == picohttp_callback_post_fin) ?
+				WTD_FRAME_FLAG_UNRELIABLE : WTD_FRAME_FLAG_RELIABLE;
+			uint8_t frame_buf[256 + length];
+			size_t frame_len = 0;
+			if (wtd_frame_encode(flag, bytes, length, frame_buf,
+					sizeof(frame_buf), &frame_len) != WTD_FRAME_OK) {
+				return -1;
+			}
+			ssize_t n = write(peer->child.stdin_fd, frame_buf, frame_len);
+			if (n < 0 || (size_t)n != frame_len) {
+				return -1;
+			}
+		}
+	}
+
+	return 0;
+}
+
 /* ALPN select callback: called when the TLS handshake completes and an ALPN
  * is negotiated. Routes to h3zero_callback for HTTP/3, allowing the h3zero
  * infrastructure (path routing, static file serving, WebTransport) to handle
@@ -518,8 +595,8 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	static picohttp_server_path_item_t path_table[1];
 	path_table[0].path = "/wt";
 	path_table[0].path_length = 3;
-	path_table[0].path_callback = NULL;
-	path_table[0].path_app_ctx = NULL;
+	path_table[0].path_callback = wtd_wt_path_callback;
+	path_table[0].path_app_ctx = &sctx;
 
 	picohttp_server_parameters_t h3_params = { 0 };
 	h3_params.web_folder = sctx.dir_path;
