@@ -29,6 +29,13 @@ peer_session_test: peer_session_test.c peer_session.c peer_session.h frame.c fra
 	@echo "  CC     $@ (peer_session.c + frame.c + $<)"
 	$(CC) $(CFLAGS) -o $@ peer_session.c frame.c $< $(LDFLAGS)
 
+# Cycle 24: deterministic fuzz harness for the frame codec. Links frame.c
+# directly (the %_test pattern would look for frame_fuzz.c which does
+# not exist).
+frame_fuzz_test: frame_fuzz_test.c frame.c frame.h
+	@echo "  CC     $@ (frame codec fuzz)"
+	$(CC) $(CFLAGS) -o $@ frame.c frame_fuzz_test.c $(LDFLAGS)
+
 # Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
 # object set for picoquic_create/--selftest; 22a adds child_process.c
 # for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so

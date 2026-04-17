@@ -15,7 +15,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 
 | Module          | Cycles | Subject                                                              |
 | --------------- | :----: | -------------------------------------------------------------------- |
-| `frame`         | 1–11   | Length-prefixed codec: flag byte + 1/2/4-byte varint + payload       |
+| `frame`         | 1–11, 24 | Length-prefixed codec: flag + 1/2/4-byte varint + payload; fuzz harness |
 | `log`           | 12     | Level filter, thread-safe stderr emit                                |
 | `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
@@ -23,12 +23,13 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
 | `webtransportd` | 19–23  | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
-All work lives in one directory under ASAN+UBSAN. 12 test binaries green:
+All work lives in one directory under ASAN+UBSAN. 13 test binaries green:
 
 ```
 $ make test
   RUN    ./child_process_test
   RUN    ./env_test
+  RUN    ./frame_fuzz_test
   RUN    ./frame_test
   RUN    ./handshake_echo_test
   RUN    ./handshake_socket_test
@@ -140,6 +141,17 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `dup2`s the daemon's stdout+stderr into one pipe and asserts
   `child stderr: oops` shows up alongside the prior 22b frame
   sentinel. Mutation-tested on the stderr assertion.
+- **24** — **frame codec fuzz harness.** `frame_fuzz_test` runs
+  20,000 random-buffer decode iterations and 2,000 random encode-
+  decode round-trips under a deterministic seed (`0xC0DE`). Every
+  decode return must be a documented status code; any `OK` return
+  must produce a `(consumed, payload, payload_len)` triple that
+  stays inside the input buffer. ASAN is the teeth — if decode
+  ever reads past its input on a malformed prefix, the harness
+  trips. Mutation-tested by dropping the decoder's
+  `buf_len < total` bounds check — the C-level assertions fire
+  immediately (and ASAN would have caught an actual OOB on
+  production-sized buffers).
 
 ## Next up
 
@@ -209,8 +221,8 @@ loop with one exit path.
 
 ## Future cycles (once v0.1 ships)
 
-- Fuzz harness for the frame codec (libFuzzer against
-  `wtd_frame_decode`; must never crash or report OOB under ASAN).
+- Upgrade the frame fuzz harness to libFuzzer (coverage-guided;
+  cycle 24 is a deterministic random harness).
 - `--cert=auto` persistence — generated cert+key survive restart.
 - Per-peer flow control: apply WT stream backpressure when the
   child's stdin pipe fills, instead of dropping unreliable frames.
