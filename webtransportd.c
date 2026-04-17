@@ -67,8 +67,6 @@ static void on_sigterm(int sig) {
 }
 
 static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
-		h3zero_callback_ctx_t *h3_ctx) __attribute__((unused));
-static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
 		h3zero_callback_ctx_t *h3_ctx) {
 	wtd_peer_t *p = malloc(sizeof(wtd_peer_t));
 	if (p == NULL) {
@@ -89,25 +87,21 @@ static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
 		free(p);
 		return NULL;
 	}
+
+	if (wtd_peer_session_start_reader(&p->session, p->child.stdout_fd,
+			NULL, NULL) != 0) {
+		wtd_log(WTD_LOG_ERROR, "peer_session_start_reader failed");
+		wtd_child_terminate(&p->child);
+		wtd_peer_session_destroy(&p->session);
+		free(p);
+		return NULL;
+	}
+
 	p->next = sctx->peers;
 	sctx->peers = p;
 	return p;
 }
 
-static void peer_accept_connect(server_ctx_t *sctx, picoquic_cnx_t *cnx,
-		h3zero_callback_ctx_t *h3_ctx, uint64_t control_stream_id)
-		__attribute__((unused));
-static void peer_accept_connect(server_ctx_t *sctx, picoquic_cnx_t *cnx,
-		h3zero_callback_ctx_t *h3_ctx, uint64_t control_stream_id) {
-	wtd_log(WTD_LOG_TRACE,
-			"[Placeholder] peer_accept_connect needed in Cycle 51: "
-			"register wt_session_cb for stream %" PRIu64,
-			control_stream_id);
-	(void)sctx;
-	(void)cnx;
-	(void)h3_ctx;
-	(void)control_stream_id;
-}
 
 static void peer_remove(server_ctx_t *sctx, wtd_peer_t *p) {
 	if (p == NULL) {
@@ -120,6 +114,7 @@ static void peer_remove(server_ctx_t *sctx, wtd_peer_t *p) {
 	if (*pp == p) {
 		*pp = p->next;
 	}
+	wtd_peer_session_stop_reader(&p->session);
 	wtd_peer_session_destroy(&p->session);
 	wtd_child_terminate(&p->child);
 	if (p->pending_dgram != NULL) {
@@ -173,15 +168,40 @@ static void drain_outbound(wtd_peer_t *p) {
 	}
 }
 
-static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
-		uint8_t *bytes, size_t length, picohttp_call_back_event_t event,
-		h3zero_stream_ctx_t *stream_ctx, void *path_app_ctx)
-		__attribute__((unused));
-static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
-		uint8_t *bytes, size_t length, picohttp_call_back_event_t event,
+static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
+		picohttp_call_back_event_t event,
 		h3zero_stream_ctx_t *stream_ctx, void *path_app_ctx) {
-	wtd_peer_t *p = (wtd_peer_t *)path_app_ctx;
 	int ret = 0;
+
+	if (event == picohttp_callback_connect) {
+		server_ctx_t *sctx = (server_ctx_t *)path_app_ctx;
+		h3zero_callback_ctx_t *h3_ctx =
+				(h3zero_callback_ctx_t *)picoquic_get_callback_context(cnx);
+		wtd_log(WTD_LOG_TRACE,
+				"[WebTransport] CONNECT received on stream %" PRIu64,
+				stream_ctx->stream_id);
+		wtd_peer_t *p = peer_create(sctx, cnx, h3_ctx);
+		if (p == NULL) {
+			wtd_log(WTD_LOG_ERROR, "peer_create failed");
+			return -1;
+		}
+		p->control_stream_id = stream_ctx->stream_id;
+		stream_ctx->path_callback_ctx = p;
+		if (h3zero_declare_stream_prefix(h3_ctx,
+				stream_ctx->stream_id, wt_session_cb, p) != 0) {
+			wtd_log(WTD_LOG_ERROR,
+					"h3zero_declare_stream_prefix failed");
+			peer_remove(sctx, p);
+			return -1;
+		}
+		wtd_log(WTD_LOG_TRACE,
+				"[WebTransport] CONNECT accepted on stream %"
+				PRIu64, p->control_stream_id);
+		return 0;
+	}
+
+	wtd_peer_t *p = (wtd_peer_t *)path_app_ctx;
+	int ret2 = 0;
 
 	switch (event) {
 	case picohttp_callback_post_data:
@@ -196,9 +216,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
 		if (stream_ctx->stream_id != p->control_stream_id && length > 0) {
 			uint8_t frame_buf[4096];
 			size_t frame_len = 0;
-			ret = wtd_frame_encode(0, bytes, length, frame_buf,
+			ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
 					sizeof(frame_buf), &frame_len);
-			if (ret == 0) {
+			if (ret2 == 0) {
 				(void)write(p->child.stdin_fd, frame_buf,
 						frame_len);
 			}
@@ -213,9 +233,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
 		if (length > 0) {
 			uint8_t frame_buf[4096];
 			size_t frame_len = 0;
-			ret = wtd_frame_encode(1, bytes, length, frame_buf,
+			ret2 = wtd_frame_encode(1, bytes, length, frame_buf,
 					sizeof(frame_buf), &frame_len);
-			if (ret == 0) {
+			if (ret2 == 0) {
 				(void)write(p->child.stdin_fd, frame_buf,
 						frame_len);
 			}
@@ -298,15 +318,17 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	sigaction(SIGINT, &sa, NULL);
 #endif
 
+	picohttp_server_path_item_t path_items[1] = {
+		{ "/wt", 3, wt_session_cb, NULL }
+	};
+
 	picohttp_server_parameters_t server_param = { 0 };
 	server_param.web_folder = dir_path;
-	server_param.path_table = NULL;
-	server_param.path_table_nb = 0;
+	server_param.path_table = path_items;
+	server_param.path_table_nb = 1;
 
-	server_ctx_t sctx = { exec_path, dir_path, NULL, NULL };
-
-	wtd_log(WTD_LOG_TRACE, "[Placeholder] server-side WebTransport stream"
-			" prefix registration needed in Cycle 51");
+	server_ctx_t sctx = { exec_path, dir_path, NULL, path_items };
+	path_items[0].path_app_ctx = &sctx;
 
 	int use_autocert = (cert != NULL && strcmp(cert, "auto") == 0);
 	uint8_t *cert_der = NULL;

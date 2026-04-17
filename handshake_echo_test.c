@@ -132,6 +132,7 @@ static int spawn_daemon(daemon_t *out) {
 			(char *)"--key=thirdparty/picoquic/certs/key.pem",
 			port_buf,
 			(char *)"--exec=./examples/echo",
+			(char *)"--log-level=4",
 			NULL,
 		};
 		execvp(argv[0], argv);
