@@ -55,10 +55,15 @@
 
 #include "version.h"
 
+#include "autocert.h"
 #include "child_process.h"
 #include "frame.h"
 #include "log.h"
 #include "peer_session.h"
+/* picoquic.h only forward-declares ptls_iovec_t; picotls.h carries
+ * the full struct. We need it so we can populate a chain for
+ * picoquic_set_tls_certificate_chain under --cert=auto. */
+#include "picotls.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
 
@@ -463,17 +468,69 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	server_ctx_t sctx = { 0 };
 	sctx.exec_path = exec_path;
 
+	/* Cycle 42: --cert=auto generates a self-signed cert + key in
+	 * memory and installs them via picoquic_set_tls_certificate_chain
+	 * / picoquic_set_tls_key (both accept DER buffers). File-based
+	 * --cert= / --key= still works unchanged — we only take the
+	 * in-memory path when `cert` is the sentinel string "auto". */
+	int use_autocert = (cert != NULL && strcmp(cert, "auto") == 0);
+	uint8_t *cert_der = NULL;
+	uint8_t *key_der = NULL;
+	size_t cert_der_len = 0;
+	size_t key_der_len = 0;
+	if (use_autocert) {
+		if (wtd_autocert_generate(&cert_der, &cert_der_len,
+				&key_der, &key_der_len) != 0) {
+			wtd_log(WTD_LOG_ERROR,
+				"webtransportd: --cert=auto generation failed");
+			return 1;
+		}
+	}
+
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 	/* default_callback_fn + default_callback_ctx are inherited by
 	 * every new cnx picoquic accepts, so our stream_cb sees data
 	 * from any client connection. */
 	picoquic_quic_t *quic = picoquic_create(
-			8, cert, key, NULL, "hq-test",
+			8,
+			use_autocert ? NULL : cert,
+			use_autocert ? NULL : key,
+			NULL, "hq-test",
 			server_stream_cb, &sctx, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
+		free(cert_der);
+		free(key_der);
 		return 1;
+	}
+	if (use_autocert) {
+		/* picoquic_set_tls_certificate_chain takes ownership of the
+		 * ptls_iovec_t* array — we malloc it, populate it, then pass
+		 * it in. picoquic_set_tls_key takes a buffer and copies it,
+		 * so we can free key_der immediately after. */
+		ptls_iovec_t *chain = (ptls_iovec_t *)malloc(sizeof(ptls_iovec_t));
+		if (chain == NULL) {
+			wtd_log(WTD_LOG_ERROR, "webtransportd: chain alloc failed");
+			picoquic_free(quic);
+			free(cert_der);
+			free(key_der);
+			return 1;
+		}
+		chain[0].base = cert_der;
+		chain[0].len = cert_der_len;
+		picoquic_set_tls_certificate_chain(quic, chain, 1);
+		/* picoquic now owns cert_der + chain. Don't free them. */
+		cert_der = NULL;
+		if (picoquic_set_tls_key(quic, key_der, key_der_len) != 0) {
+			wtd_log(WTD_LOG_ERROR,
+				"webtransportd: --cert=auto key install failed");
+			picoquic_free(quic);
+			free(key_der);
+			return 1;
+		}
+		free(key_der); /* picoquic_set_tls_key copies */
+		key_der = NULL;
 	}
 	/* Cycle 22e: enable QUIC datagrams. 1500 ≈ ethernet MTU — any
 	 * non-zero value advertises support in the transport params. */
@@ -579,9 +636,16 @@ int main(int argc, char **argv) {
 	}
 
 	if (is_server) {
-		if (cert == NULL || key == NULL || port_str == NULL) {
+		/* --cert=auto generates a self-signed cert + key in memory;
+		 * --key= is implicit in that mode. File-based cert + key
+		 * still requires both. */
+		int is_auto_cert = (cert != NULL && strcmp(cert, "auto") == 0);
+		if (port_str == NULL
+				|| cert == NULL
+				|| (!is_auto_cert && key == NULL)) {
 			wtd_log(WTD_LOG_ERROR,
-					"webtransportd: --server requires --cert=, --key=, --port=");
+					"webtransportd: --server requires --cert=<path|auto> %s--port=",
+					is_auto_cert ? "" : "--key= ");
 			return 2;
 		}
 		long port = strtol(port_str, NULL, 10);

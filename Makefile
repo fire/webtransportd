@@ -288,16 +288,17 @@ thirdparty/picotls/picotlsvs/picotls/%.o: thirdparty/picotls/picotlsvs/picotls/%
 # log.c for --log-level. The -isystem keeps -Werror quiet on
 # picoquic.h / picoquic_packet_loop.h.
 webtransportd: webtransportd.c version.h \
+               autocert.c autocert.h \
                child_process.c child_process.h \
                cmdline.c cmdline.h \
                peer_session.c peer_session.h \
                frame.c frame.h \
                log.c log.h \
                $(VENDOR_ALL_OBJS) $(WINRES_OBJ)
-	@echo "  CC     $@ (full vendored link + child_process + cmdline + peer_session + log)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ webtransportd.c child_process.c cmdline.c peer_session.c \
-		frame.c log.c \
+	@echo "  CC     $@ (full vendored link + autocert + child_process + cmdline + peer_session + log)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) $(VENDOR_ISYSTEM) \
+		-o $@ webtransportd.c autocert.c child_process.c cmdline.c \
+		peer_session.c frame.c log.c \
 		$(VENDOR_ALL_OBJS) $(WINRES_OBJ) \
 		$(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
@@ -308,6 +309,18 @@ webtransportd: webtransportd.c version.h \
 cmdline_test: cmdline_test.c cmdline.c cmdline.h
 	@echo "  CC     $@ (cmdline.c + $<)"
 	$(CC) $(CFLAGS) -o $@ cmdline.c cmdline_test.c $(LDFLAGS)
+
+# Cycle 42: autocert_test links the full mbedtls TU set because the
+# X.509 write path (autocert.c itself) pulls in mbedtls_x509write +
+# mbedtls_pk + mbedtls_ecp + mbedtls_entropy, and the parse-side
+# assertions in the test pull in mbedtls_x509_crt_parse. The
+# Windows link libs ($WINDOWS_LIBS) are needed there for bcrypt
+# (picotls-style entropy).
+autocert_test: autocert_test.c autocert.c autocert.h $(MBEDTLS_OBJS)
+	@echo "  CC     $@ (autocert.c + mbedtls + $<)"
+	$(CC) $(CFLAGS) $(VENDOR_ISYSTEM) \
+		-o $@ autocert.c autocert_test.c $(MBEDTLS_OBJS) \
+		$(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 40a: Windows resource object. windres turns the .rc script
 # (which just points at webtransportd.exe.manifest) into a COFF .o
@@ -398,6 +411,7 @@ handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (two concurrent loopback clients)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
+
 
 # Cycle 40a: the manifest test checks GetACP() inside its own
 # process, so it needs the manifest linked into the test binary
