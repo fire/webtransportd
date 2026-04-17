@@ -130,6 +130,13 @@ static void drain_outbound(wtd_peer_t *p) {
 	}
 
 	wtd_outbound_frame_t *frame = wtd_work_queue_drain(&p->session.outbound);
+	if (frame == NULL) {
+		wtd_log(WTD_LOG_TRACE,
+				"[Cycle 51] drain_outbound: no frames in queue");
+		return;
+	}
+
+	wtd_log(WTD_LOG_TRACE, "[Cycle 51] drain_outbound: processing frames");
 	while (frame != NULL) {
 		wtd_outbound_frame_t *next = frame->next;
 
@@ -143,6 +150,10 @@ static void drain_outbound(wtd_peer_t *p) {
 						frame->flag, frame->payload_len,
 						(int)frame->payload_len,
 						frame->payload);
+			} else {
+				wtd_log(WTD_LOG_WARN,
+						"[Cycle 51] drain_outbound: "
+						"data_stream_id not set for flag=0");
 			}
 		} else {
 			if (p->pending_dgram != NULL) {
@@ -212,6 +223,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 		if (p->data_stream_id == UINT64_MAX &&
 				stream_ctx->stream_id != p->control_stream_id) {
 			p->data_stream_id = stream_ctx->stream_id;
+			wtd_log(WTD_LOG_TRACE,
+					"[Cycle 51] data_stream_id set to %" PRIu64,
+					p->data_stream_id);
 		}
 		if (stream_ctx->stream_id != p->control_stream_id && length > 0) {
 			uint8_t frame_buf[4096];
@@ -219,8 +233,16 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 			ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
 					sizeof(frame_buf), &frame_len);
 			if (ret2 == 0) {
-				(void)write(p->child.stdin_fd, frame_buf,
-						frame_len);
+				ssize_t nwritten = write(p->child.stdin_fd,
+						frame_buf, frame_len);
+				wtd_log(WTD_LOG_TRACE,
+						"[Cycle 51] wrote %zu bytes to "
+						"child stdin (ret=%zd)",
+						frame_len, nwritten);
+			} else {
+				wtd_log(WTD_LOG_ERROR,
+						"[Cycle 51] wtd_frame_encode "
+						"failed: %d", ret2);
 			}
 		}
 		break;
@@ -236,8 +258,17 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 			ret2 = wtd_frame_encode(1, bytes, length, frame_buf,
 					sizeof(frame_buf), &frame_len);
 			if (ret2 == 0) {
-				(void)write(p->child.stdin_fd, frame_buf,
-						frame_len);
+				ssize_t nwritten = write(p->child.stdin_fd,
+						frame_buf, frame_len);
+				wtd_log(WTD_LOG_TRACE,
+						"[Cycle 51] datagram: wrote %zu "
+						"bytes to child stdin (ret=%zd)",
+						frame_len, nwritten);
+			} else {
+				wtd_log(WTD_LOG_ERROR,
+						"[Cycle 51] datagram: "
+						"wtd_frame_encode failed: %d",
+						ret2);
 			}
 		}
 		break;
@@ -299,8 +330,16 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	}
 
 	server_ctx_t *sctx = (server_ctx_t *)cb_ctx;
+	int peer_count = 0;
 	for (wtd_peer_t *p = sctx->peers; p != NULL; p = p->next) {
+		peer_count++;
 		drain_outbound(p);
+	}
+
+	if (peer_count > 0) {
+		wtd_log(WTD_LOG_TRACE,
+				"[Cycle 51] server_loop_cb: drained %d peers",
+				peer_count);
 	}
 
 	return 0;
