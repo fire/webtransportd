@@ -1,0 +1,91 @@
+webtransportd — change log
+==========================
+
+Unreleased
+----------
+
+Module foundations (cycles 1–20)
+--------------------------------
+
+* Cycles 1–11 — length-prefixed frame codec: flag byte + 1/2/4-byte
+  QUIC-style varint + payload. Every error path (reserved bits,
+  BUF_TOO_SMALL, INCOMPLETE, MAX_PAYLOAD cap) fenced under ASAN.
+* Cycle 12 — log module: level filter, thread-safe mutex-guarded
+  stderr emit.
+* Cycles 13–15 — env module: WEBTRANSPORT_* CGI set and --passenv
+  whitelist.
+* Cycle 16 — child_process: fork + execvp with three pipes, SIGTERM
+  + reap under timeout.
+* Cycles 17–18 — peer_session: mutex-guarded FIFO work queue and
+  reader thread that decodes child stdout into frames on the queue.
+* Cycles 19–20 — webtransportd binary entry: argv parsing and
+  --version, smoke-tested via fork/exec.
+
+Vendored build bring-up (cycles 21a–c)
+--------------------------------------
+
+* 21a — error_names.c from picoquic compiles and links under the
+  Godot-style preprocessor set; vendored TUs use -w so their
+  warnings don't fight our -Werror.
+* 21b — every thirdparty/picoquic/picoquic/*.c (50 TUs) compiles.
+* 21c — the full vendored stack (picoquic + picohttp + picotls +
+  mbedtls + cifra + micro-ecc + loglib; 217 TUs) compiles and
+  links. picoquic_create(...) returns non-NULL under ASAN+UBSAN.
+
+Daemon wiring (cycles 21d.1–22e)
+--------------------------------
+
+* 21d.1 — webtransportd --selftest exercises the full mbedtls TLS
+  init path inside the daemon binary. Documents the darwin-arm64
+  ASAN/pthread_create quirk (pc=0 in the thread entry) that pushes
+  us toward a synchronous packet loop on the main thread.
+* 21d.2 — in-process client+server handshake reaches
+  picoquic_state_ready via synchronous packet pumping. No sockets,
+  no pthread.
+* 21d.3 — real-socket handshake over loopback UDP.
+* 22a — --exec=<bin> spawns the configured child on first cnx-ready,
+  reaps on shutdown.
+* 22b — peer_session reader thread attaches to spawned child's
+  stdout_fd; decoded frames surface on the daemon log.
+* 22c — server_stream_cb frames inbound QUIC stream bytes into the
+  child's stdin_fd.
+* 22d — decoded outbound frames echo back via picoquic_add_to_stream
+  so the client sees its own bytes. v0.1 echo works end-to-end.
+* 22e — datagram symmetry: flag=1 frames round-trip via
+  picoquic_queue_datagram_frame on both sides.
+
+Hardening and polish (cycles 23–30)
+-----------------------------------
+
+* 23 — dedicated pthread forwards child stderr_fd to the daemon's
+  own stderr, prefixed "child stderr: ".
+* 24 — deterministic fuzz harness for the frame codec
+  (frame_fuzz_test). Catches OOB reads on any malformed prefix
+  under ASAN.
+* 25 — decoder accepts the QUIC 8-byte varint form (prefix 0b11)
+  that previously silently fell into the 4-byte branch.
+* 26 — SIGTERM/SIGINT is the only shutdown path; removed the 1 s
+  auto-exit-after-ready timer.
+* 27 — --log-level=<0..4> wires log.c into the daemon.
+* 28 — log lines now carry a [LEVEL] prefix; every fprintf(stderr)
+  in the daemon routed through wtd_log (forwarder thread included).
+* 29 — per-cnx wtd_peer_t list. Each cnx gets its own spawned
+  child, peer_session reader, and echo target. Two concurrent
+  clients no longer trample each other's state.
+* 30 — richer --help output: description, per-subcommand
+  breakdown, options table, framing spec note.
+
+Ship prep (cycles 31–34)
+------------------------
+
+* 31 — LICENSE (BSD-2-Clause) for first-party code; vendored
+  libraries keep their upstream terms.
+* 32 — examples/echo.c, a minimal C reference child.
+  handshake_echo_test switched from /bin/cat to this helper so the
+  round trip exercises our codec on the child side too.
+* 33 — daemon-launching tests derive their UDP port from the test
+  pid to avoid the retry-flake when a previous run's daemon hasn't
+  fully released the port.
+* 34 — examples/frame-helper.sh for shell-level framing. One
+  (flag, payload) -> framed envelope on stdout, python3 handles
+  the varint widths.

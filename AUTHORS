@@ -1,0 +1,16 @@
+webtransportd is authored and maintained by:
+
+K. S. Ernest (iFire) Lee  <ernest.lee@chibifire.com>
+
+Also committing as:
+
+V-Sekai                   <ernest.lee@chibifire.com>
+
+Vendored third-party code under thirdparty/ retains the authorship
+recorded in each upstream project's repository:
+
+  thirdparty/mbedtls/   — Arm Ltd. and the Mbed TLS contributors
+  thirdparty/picoquic/  — Private Octopus, Inc. (Christian Huitema)
+                          and the picoquic contributors
+  thirdparty/picotls/   — DeNA Co., Ltd. (Kazuho Oku) and the
+                          picotls contributors
