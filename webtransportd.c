@@ -67,7 +67,9 @@
  * picoquic_set_tls_certificate_chain under --cert=auto. */
 #include "picotls.h"
 #include "picoquic.h"
+#include "picoquic_internal.h"
 #include "picoquic_packet_loop.h"
+#include "h3zero.h"
 #include "h3zero_common.h"
 #include "pico_webtransport.h"
 
@@ -448,6 +450,28 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	return 0;
 }
 
+/* ALPN select callback: called when the TLS handshake completes and an ALPN
+ * is negotiated. Routes to h3zero_callback for HTTP/3, allowing the h3zero
+ * infrastructure (path routing, static file serving, WebTransport) to handle
+ * the connection. */
+static size_t alpn_select_callback(picoquic_quic_t *quic,
+		picoquic_iovec_t *list, size_t count) {
+	size_t ret = count;
+	picoquic_cnx_t *cnx = quic->cnx_in_progress;
+	if (cnx == NULL) {
+		return ret;
+	}
+	for (size_t i = 0; i < count; i++) {
+		/* Check for "h3" (HTTP/3). */
+		if (list[i].len == 2 && memcmp(list[i].base, "h3", 2) == 0) {
+			void *ctx = picoquic_get_default_callback_context(quic);
+			picoquic_set_callback(cnx, h3zero_callback, ctx);
+			return i;
+		}
+	}
+	return ret;
+}
+
 static int cmd_server(const char *cert, const char *key, uint16_t port,
 		const char *exec_path, const char *dir_path) {
 	/* POSIX has sigaction (reliable, atomic mask reset); mingw only
@@ -489,14 +513,12 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 
-	/* Create h3zero parameters for path routing and static file serving.
-	 * Register h3zero_callback directly at picoquic_create time so that
-	 * CONNECT requests (which arrive before connection ready state) are
-	 * properly handled by HTTP/3 layer. */
+	/* Set up h3zero context for HTTP/3 / WebTransport handling. The context
+	 * is created with path routing and static file serving parameters. */
 	static picohttp_server_path_item_t path_table[1];
 	path_table[0].path = "/wt";
 	path_table[0].path_length = 3;
-	path_table[0].path_callback = NULL;  /* h3zero handles WebTransport internally */
+	path_table[0].path_callback = NULL;
 	path_table[0].path_app_ctx = NULL;
 
 	picohttp_server_parameters_t h3_params = { 0 };
@@ -504,12 +526,20 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	h3_params.path_table = path_table;
 	h3_params.path_table_nb = 1;
 
+	h3zero_callback_ctx_t *h3_ctx = h3zero_callback_create_context(&h3_params);
+	if (h3_ctx == NULL) {
+		wtd_log(WTD_LOG_ERROR, "webtransportd: h3zero context creation failed");
+		free(cert_der);
+		free(key_der);
+		return 1;
+	}
+
 	picoquic_quic_t *quic = picoquic_create(
 			8,
 			use_autocert ? NULL : cert,
 			use_autocert ? NULL : key,
 			NULL, "h3",
-			h3zero_callback, &h3_params, NULL, NULL, reset_seed,
+			NULL, h3_ctx, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
@@ -517,6 +547,11 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 		free(key_der);
 		return 1;
 	}
+
+	/* Register the ALPN select callback so h3zero_callback is set for HTTP/3
+	 * connections after TLS negotiation completes. */
+	picoquic_set_alpn_select_fn_v2(quic, alpn_select_callback);
+
 	wtd_log(WTD_LOG_INFO, "webtransportd: picoquic server ready, waiting for connections");
 	/* Cycle 43: Enable WebTransport on the server */
 	picowt_set_default_transport_parameters(quic);
@@ -573,6 +608,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	 * cnx, which must still be attached to the quic context. */
 	peer_destroy_all(&sctx);
 	picoquic_free(quic);
+	free(h3_ctx);
 
 	/* SIGTERM interrupts the loop's recvmsg/poll with EINTR, which the
 	 * packet loop surfaces as a non-zero rc. If we asked to exit, that
