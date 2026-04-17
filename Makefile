@@ -36,6 +36,14 @@ frame_fuzz_test: frame_fuzz_test.c frame.c frame.h
 	@echo "  CC     $@ (frame codec fuzz)"
 	$(CC) $(CFLAGS) -o $@ frame.c frame_fuzz_test.c $(LDFLAGS)
 
+# Cycle 34: exec's the shell framing helper and decodes its output
+# with wtd_frame_decode. Depends on both frame.c and the script
+# (the script is not a build product — listing it here just makes
+# the dependency explicit; `make clean` doesn't touch it).
+frame_helper_test: frame_helper_test.c frame.c frame.h examples/frame-helper.sh
+	@echo "  CC     $@ (frame-helper.sh round-trip)"
+	$(CC) $(CFLAGS) -o $@ frame.c frame_helper_test.c $(LDFLAGS)
+
 # Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
 # object set for picoquic_create/--selftest; 22a adds child_process.c
 # for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so

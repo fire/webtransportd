@@ -291,9 +291,12 @@ useful slices, rough order of leverage-per-effort:
   `AUTHORS`, `CHANGES`.
 - **Examples**: ✅ `examples/echo.c` shipped in cycle 32 (minimal
   C reference child — decode framed stdin, re-encode to framed
-  stdout). Still wanted: `examples/echo.sh` + `examples/frame-helper.sh`
-  (shell-friendly framing helpers). `examples/frame_hi.c` already
-  exists as the cycle-22b test helper.
+  stdout). ✅ `examples/frame-helper.sh` shipped in cycle 34
+  (emit one framed envelope, delegate varint math to python3;
+  `frame_helper_test` asserts the output decodes back to the
+  original flag + payload). Still wanted: a shell-side `echo.sh`
+  equivalent. `examples/frame_hi.c` already exists as the
+  cycle-22b test helper.
 
 ## Design notes
 
