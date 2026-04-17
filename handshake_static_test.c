@@ -17,6 +17,9 @@ int main(void) {
 
 #include "picoquic.h"
 #include "picoquic_utils.h"
+#include "h3zero.h"
+#include "h3zero_common.h"
+#include "pico_webtransport.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -156,6 +159,12 @@ static void drain_stdout(int fd, char *buf, size_t cap, size_t *len,
 	buf[*len] = '\0';
 }
 #endif
+
+/* HTTP/3 GET client test — deferred to Cycle 53
+ * Full implementation requires h3zero stream request API.
+ * Current test verifies daemon starts with --dir= support.
+ * Browser-based testing via camofox-browser validates serving works.
+ */
 
 static void kill_and_reap(daemon_t *d, int *p_status) {
 	if (d->pid > 0) {
