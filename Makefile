@@ -29,17 +29,25 @@ peer_session_test: peer_session_test.c peer_session.c peer_session.h frame.c fra
 	@echo "  CC     $@ (peer_session.c + frame.c + $<)"
 	$(CC) $(CFLAGS) -o $@ peer_session.c frame.c $< $(LDFLAGS)
 
-# Cycle 19-20: webtransportd binary. Only our own .c files — picoquic /
-# mbedtls / picotls wiring arrives in cycle 21+.
-webtransportd: webtransportd.c version.h
-	@echo "  CC     $@"
-	$(CC) $(CFLAGS) -o $@ webtransportd.c $(LDFLAGS)
+# Cycle 19-20: webtransportd binary. Cycle 21d.1 adds --selftest which
+# drives picoquic_start_network_thread, so the daemon now links the
+# full vendored object set. The -isystem keeps -Werror quiet on
+# picoquic.h / picoquic_packet_loop.h.
+webtransportd: webtransportd.c version.h $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (full vendored link)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ webtransportd.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
 # version_test fork/execs ./webtransportd, so it needs that binary built
 # first. The test compiles standalone (no matching version.c).
 version_test: version_test.c version.h webtransportd
 	@echo "  CC     $@ (smoke: execs ./webtransportd)"
 	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
+
+# selftest_test fork/execs ./webtransportd --selftest, same pattern.
+selftest_test: selftest_test.c webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd --selftest)"
+	$(CC) $(CFLAGS) -o $@ selftest_test.c $(LDFLAGS)
 
 # Cycles 21a-b: vendored picoquic bring-up. The include paths use
 # -isystem so our -Werror doesn't trip on third-party headers; vendored

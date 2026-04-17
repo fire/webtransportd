@@ -20,10 +20,10 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `env`           | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist                                                                                |     ASAN+UBSAN     |
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
-|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version` (0.1.0-dev); smoke test fork/execs the daemon, checks exit 0, stdout non-empty, contains WTD_VERSION   |     ASAN+UBSAN     |
+|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version`; 21d.1: `--selftest` exercises full mbedtls-backed `picoquic_create` + `picoquic_free` path from the daemon binary. Fork/exec smoke tests assert both (`version_test`, `selftest_test`) | ASAN+UBSAN |
 |  ✅  | `thirdparty/`   | 21a-c: full vendored build — picoquic (50) + picohttp (13) + picotls/lib (9) + cifra adapters (5) + cifra internals (24) + micro-ecc (1) + picoquic_mbedtls (2) + mbedtls/library (103) + loglib (10) all compile + link; `picoquic_create(...)` returns non-NULL under mbedtls-backed TLS | ASAN+UBSAN |
 
-Eight test binaries, all green:
+Nine test binaries, all green:
 
 ```
 $ make test
@@ -34,6 +34,7 @@ $ make test
   RUN    ./peer_session_test
   RUN    ./picoquic_create_test
   RUN    ./picoquic_link_test
+  RUN    ./selftest_test
   RUN    ./version_test
   OK     all tests passed
 ```
@@ -67,9 +68,27 @@ each driven by one failing test:
   calls `picoquic_create(8, NULL-cert, NULL-key, ..., zero_reset_seed,
   ...)` — asserts non-NULL return, then `picoquic_free` tears it down
   under ASAN+UBSAN without leaks.
-- **21d (handshake)**: `handshake_test` drives a picoquic client
-  against the daemon and asserts a WebTransport CONNECT reaches
-  `picoquic_state_server_ready`.
+- ✅ **21d.1 (done)**: `webtransportd --selftest` exercises
+  `picoquic_create` + `picoquic_free` end-to-end from the daemon
+  binary (full mbedtls TLS init path) under ASAN+UBSAN. The
+  daemon now links the entire vendored object set. `selftest_test`
+  fork/execs the binary and asserts exit 0 + stdout contains
+  `selftest ok`. NOTE: starting the picoquic packet-loop thread
+  (`picoquic_start_network_thread`) currently trips an ASAN
+  thread-start crash (pc=0) on darwin-arm64; investigation deferred
+  to a focused cycle because 21d.2 doesn't need the pthread path.
+- **21d.2 (sim handshake)**: in-process client+server picoquic
+  contexts driven synchronously with `picoquic_prepare_next_packet`
+  / `picoquic_incoming_packet` (or `sim_link.c` helpers). RED: run
+  the pump until the server context reaches
+  `picoquic_state_server_ready`, assert non-zero timeout. No sockets,
+  no threads.
+- **21d.3 (real-socket handshake)**: `handshake_test` launches
+  `./webtransportd` as a subprocess with a server cert+key,
+  opens a real loopback UDP socket with its own picoquic client,
+  and asserts a WebTransport CONNECT reaches
+  `picoquic_state_server_ready`. Also the natural place to debug
+  and fix the pthread_create / ASAN crash.
 - **21e (bootstrap)**: `picoquic_create` with server cert+key (or
   `--cert=auto` self-signed), `picoquic_set_alpn_select_fn_v2`,
   `picowt_set_default_transport_parameters`,
