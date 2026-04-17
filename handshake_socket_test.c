@@ -48,6 +48,7 @@ int main(void) {
 
 #include "picoquic.h"
 #include "picoquic_utils.h"
+#include "h3zero.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -223,7 +224,7 @@ static int run_handshake(uint16_t server_port) {
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 	picoquic_quic_t *quic = picoquic_create(
-			4, NULL, NULL, NULL, "hq-test",
+			4, NULL, NULL, NULL, "h3",
 			NULL, NULL, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
@@ -234,7 +235,7 @@ static int run_handshake(uint16_t server_port) {
 	picoquic_cnx_t *cnx = picoquic_create_client_cnx(
 			quic, (struct sockaddr *)&srv,
 			picoquic_current_time(), 0, "test.example",
-			"hq-test", NULL, NULL);
+			"h3", NULL, NULL);
 	if (cnx == NULL) {
 		picoquic_free(quic);
 		close(sock);
@@ -280,6 +281,19 @@ static int run_handshake(uint16_t server_port) {
 		}
 
 		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
+			if (!ready) {
+				/* Cycle 43: send HTTP/3 CONNECT to /wt for WebTransport */
+				uint8_t connect_frame[512];
+				uint8_t *next = h3zero_create_connect_header_frame(
+					connect_frame, connect_frame + sizeof(connect_frame),
+					"test.example", (const uint8_t *)"/wt", 3,
+					"webtransport", NULL, NULL, NULL);
+				if (next != NULL) {
+					size_t frame_len = next - connect_frame;
+					(void)picoquic_add_to_stream(cnx, 0,
+						connect_frame, frame_len, 0);
+				}
+			}
 			ready = 1;
 			break;
 		}

@@ -398,7 +398,7 @@ handshake_test: handshake_test.c $(VENDOR_ALL_OBJS)
 # over real sendto/recvfrom, so this test needs the daemon binary built.
 handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (loopback UDP handshake)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 22c: end-to-end daemon-internal echo. Client sends bytes on a
@@ -409,7 +409,7 @@ handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $
 # actually exercises the frame codec on the child side too).
 handshake_echo_test: handshake_echo_test.c webtransportd examples/echo $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (loopback UDP echo via examples/echo)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 29: two concurrent clients against one daemon. Asserts each
@@ -417,7 +417,7 @@ handshake_echo_test: handshake_echo_test.c webtransportd examples/echo $(VENDOR_
 # wtd_peer_t split.
 handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (two concurrent loopback clients)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 45: per-peer flow control. Spawns daemon with a slow child
@@ -433,7 +433,7 @@ flow_control_test: flow_control_test.c webtransportd $(VENDOR_ALL_OBJS)
 # verifies --dir= flag is parsed and static file GET requests work.
 handshake_static_test: handshake_static_test.c webtransportd examples/echo $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (static file serving via --dir=)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_static_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 40a: the manifest test checks GetACP() inside its own

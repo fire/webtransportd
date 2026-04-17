@@ -36,6 +36,7 @@ int main(void) {
 
 #include "picoquic.h"
 #include "picoquic_utils.h"
+#include "h3zero.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -266,7 +267,7 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 	picoquic_quic_t *quic = picoquic_create(
-			4, NULL, NULL, NULL, "hq-test",
+			4, NULL, NULL, NULL, "h3",
 			NULL, NULL, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
@@ -279,7 +280,7 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 	picoquic_cnx_t *cnx = picoquic_create_client_cnx(
 			quic, (struct sockaddr *)&srv,
 			picoquic_current_time(), 0, "test.example",
-			"hq-test", client_stream_cb, cctx);
+			"h3", client_stream_cb, cctx);
 	if (cnx == NULL) {
 		picoquic_free(quic);
 		close(sock);
@@ -328,10 +329,20 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
 			if (!ready) {
 				ready = 1;
+				/* Cycle 43: send HTTP/3 CONNECT to /wt for WebTransport */
+				uint8_t connect_frame[512];
+				uint8_t *next = h3zero_create_connect_header_frame(
+					connect_frame, connect_frame + sizeof(connect_frame),
+					"test.example", (const uint8_t *)"/wt", 3,
+					"webtransport", NULL, NULL, NULL);
+				if (next != NULL) {
+					size_t frame_len = next - connect_frame;
+					(void)picoquic_add_to_stream(cnx, 0,
+						connect_frame, frame_len, 0);
+				}
 			}
-			if (!sent) {
-				/* Bidi client-initiated stream 0. FIN=1 so the
-				 * server sees stream_fin straight away. */
+			if (!sent && ready) {
+				/* Send payload after CONNECT frame on stream 0 */
 				(void)picoquic_add_to_stream(cnx, 0,
 						(const uint8_t *)PAYLOAD,
 						sizeof(PAYLOAD) - 1, 1);
@@ -340,9 +351,6 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 						sizeof(DGRAM_PAYLOAD) - 1,
 						(const uint8_t *)DGRAM_PAYLOAD);
 				sent = 1;
-				/* Keep pumping ~800 ms after send so the server
-				 * has time to receive both, pipe through cat,
-				 * decode, and write echoes back on each channel. */
 				deadline = now + 800ull * 1000;
 			}
 		}

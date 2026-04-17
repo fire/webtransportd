@@ -69,6 +69,7 @@
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
 #include "h3zero_common.h"
+#include "pico_webtransport.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -402,11 +403,24 @@ static int wtd_wt_session_callback(picoquic_cnx_t *cnx,
 		return 0;
 	}
 
+	/* Accept CONNECT :protocol=webtransport request to upgrade stream */
+	if (wt_event == picohttp_callback_connect) {
+		/* Cycle 43: Accept WebTransport protocol negotiation */
+		(void)picowt_select_wt_protocol(stream_ctx, "webtransport");
+		return 0;
+	}
+	if (wt_event == picohttp_callback_connect_accepted) {
+		return 0;
+	}
+
 	uint8_t flag;
 	if (wt_event == picohttp_callback_post_data
 			|| wt_event == picohttp_callback_post_fin) {
 		flag = WTD_FRAME_FLAG_RELIABLE;
+	} else if (wt_event == picohttp_callback_post_datagram) {
+		flag = WTD_FRAME_FLAG_UNRELIABLE;
 	} else {
+		/* Ignore other events (free, reset, stop_sending, etc.) */
 		return 0;
 	}
 
@@ -569,6 +583,8 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 		free(key_der);
 		return 1;
 	}
+	/* Cycle 43: Enable WebTransport on the server */
+	picowt_set_default_transport_parameters(quic);
 	if (use_autocert) {
 		/* picoquic_set_tls_certificate_chain takes ownership of the
 		 * ptls_iovec_t* array — we malloc it, populate it, then pass
