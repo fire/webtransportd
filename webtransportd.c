@@ -12,11 +12,16 @@
  * a connection reaches ready state; the child is reaped when the
  * daemon tears down. Proves child_process.c works from inside the
  * real server pipeline (not just a unit test harness).
+ * Cycle 22b: wtd_peer_session reader thread attaches to the spawned
+ * child's stdout_fd; every complete frame the child writes lands on
+ * the work queue, and the picoquic loop callback drains the queue
+ * on each iteration, printing "outbound frame: <payload>" lines.
  */
 
 #include "version.h"
 
 #include "child_process.h"
+#include "peer_session.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
 
@@ -63,7 +68,34 @@ typedef struct {
 	const char *exec_path;
 	wtd_child_t child;
 	int child_spawned;
+	wtd_peer_session_t peer;
+	int peer_initialised;
+	int reader_started;
+	atomic_int frames_pending;
 } server_ctx_t;
+
+static void on_outbound_ready(void *arg) {
+	server_ctx_t *s = (server_ctx_t *)arg;
+	atomic_fetch_add(&s->frames_pending, 1);
+}
+
+static void drain_outbound(server_ctx_t *ctx) {
+	if (atomic_load(&ctx->frames_pending) == 0) {
+		return;
+	}
+	atomic_store(&ctx->frames_pending, 0);
+	wtd_outbound_frame_t *head = wtd_work_queue_drain(&ctx->peer.outbound);
+	while (head != NULL) {
+		wtd_outbound_frame_t *next = head->next;
+		printf("outbound frame: flag=%u len=%zu payload=",
+				(unsigned)head->flag, head->payload_len);
+		(void)fwrite(head->payload, 1, head->payload_len, stdout);
+		printf("\n");
+		fflush(stdout);
+		free(head);
+		head = next;
+	}
+}
 
 static int server_loop_cb(picoquic_quic_t *quic,
 		picoquic_packet_loop_cb_enum cb,
@@ -97,6 +129,18 @@ static int server_loop_cb(picoquic_quic_t *quic,
 						printf("child spawned pid=%ld\n",
 								(long)ctx->child.pid);
 						fflush(stdout);
+						wtd_peer_session_init(&ctx->peer);
+						ctx->peer_initialised = 1;
+						int rr = wtd_peer_session_start_reader(
+								&ctx->peer, ctx->child.stdout_fd,
+								on_outbound_ready, ctx);
+						if (rr == 0) {
+							ctx->reader_started = 1;
+						} else {
+							fprintf(stderr,
+									"webtransportd: start_reader rc=%d\n",
+									rr);
+						}
 					} else {
 						fprintf(stderr,
 								"webtransportd: child_spawn(%s) rc=%d\n",
@@ -108,6 +152,8 @@ static int server_loop_cb(picoquic_quic_t *quic,
 		}
 		cnx = picoquic_get_next_cnx(cnx);
 	}
+	drain_outbound(ctx);
+
 	if (ctx->client_reached_ready) {
 		uint64_t now = picoquic_get_quic_time(quic);
 		if (now - ctx->ready_at_us > 200 * 1000) {
@@ -152,8 +198,17 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
+
+	/* Closing the child's stdin/stdout side (via wtd_child_terminate)
+	 * gives the reader thread's blocking read() an EOF so it exits;
+	 * then wtd_peer_session_destroy joins it and drains the queue.
+	 * Ordering: terminate child first, then destroy peer session. */
 	if (sctx.child_spawned) {
 		wtd_child_terminate(&sctx.child);
+	}
+	if (sctx.peer_initialised) {
+		drain_outbound(&sctx); /* last flush of anything buffered */
+		wtd_peer_session_destroy(&sctx.peer);
 	}
 	picoquic_free(quic);
 

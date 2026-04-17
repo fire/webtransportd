@@ -11,19 +11,19 @@ still green. ASAN + UBSAN run on every test. The source tree is
 self-contained — mbedtls, picoquic, and picotls are all vendored under
 `thirdparty/` so there is no system TLS package dependency.
 
-## Status
+## Status at a glance
 
-| Done | Module          | Cycles / subject                                                                                                                                    |     Sanitizer      |
-| :--: | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------: |
-|  ✅  | `frame`         | 1-11: encode/decode, INCOMPLETE on prefix, reserved bits, 1/2/4-byte varints, MAX_PAYLOAD, BUF_TOO_SMALL, two-frames-one-buffer, public API settled |     ASAN+UBSAN     |
-|  ✅  | `log`           | 12: level filter, thread-safe stderr emit                                                                                                           |     ASAN+UBSAN     |
-|  ✅  | `env`           | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist                                                                                |     ASAN+UBSAN     |
-|  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
-|  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
-|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version`; 21d.1: `--selftest`; 21d.3: `--server --cert= --key= --port=` drives a synchronous `picoquic_packet_loop_v3` (no pthread — sidesteps darwin-arm64 ASAN crash), SIGTERM-clean shutdown; 22a: `--exec=<bin>` spawns the child via `child_process.c` on first `picoquic_state_ready` and reaps on loop exit (verified by `handshake_socket_test` checking `child spawned pid=` in the daemon's stdout + ASAN-clean reap) | ASAN+UBSAN |
-|  ✅  | `thirdparty/`   | 21a-c: full vendored build — picoquic (50) + picohttp (13) + picotls/lib (9) + cifra adapters (5) + cifra internals (24) + micro-ecc (1) + picoquic_mbedtls (2) + mbedtls/library (103) + loglib (10) all compile + link; `picoquic_create(...)` returns non-NULL under mbedtls-backed TLS | ASAN+UBSAN |
+| Module          | Cycles | Subject                                                              |
+| --------------- | :----: | -------------------------------------------------------------------- |
+| `frame`         | 1–11   | Length-prefixed codec: flag byte + 1/2/4-byte varint + payload       |
+| `log`           | 12     | Level filter, thread-safe stderr emit                                |
+| `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
+| `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
+| `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
+| `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
+| `webtransportd` | 19–22b | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
-Eleven test binaries, all green:
+All work lives in one directory under ASAN+UBSAN. 11 test binaries green:
 
 ```
 $ make test
@@ -41,101 +41,140 @@ $ make test
   OK     all tests passed
 ```
 
+## Cycle log
+
+### Cycles 1–20 — module foundations
+
+Frame codec (1–11), log (12), env (13–15), child_process (16),
+peer_session (17–18), daemon entry with `--version` (19–20). All
+isolated unit tests with deliberate RED-then-GREEN slices.
+
+### Cycles 21a–c — vendored build bring-up
+
+- **21a** — `picoquic_error_name` links. Minimal slice: `-isystem` on
+  the vendored picoquic header dir + four Godot-style preprocessor
+  defines (`PICOQUIC_WITH_MBEDTLS`, `PTLS_WITHOUT_OPENSSL`,
+  `PTLS_WITHOUT_FUSION`, `DISABLE_DEBUG_PRINTF`). Vendored TUs compile
+  under a softer `-w` profile so their warnings don't fight `-Werror`.
+- **21b** — every `thirdparty/picoquic/picoquic/*.c` compiles (50 TUs,
+  excluding Windows-only `winsockloop.c`). `picoquic_link_test`
+  force-builds the full object set, so any regression in any TU
+  turns `make test` red.
+- **21c** — the full vendored build links (217 TUs total). Exclusions
+  match Godot's SCsub: brotli-dependent `certificate_compression`,
+  x86-only `fusion`, upstream-broken `mbedtls_sign`, openssl-backed
+  `openssl.c`, two alternate curve25519 implementations, all cifra
+  test drivers, and Godot's `godot_core_mbedtls_platform.c` shim for
+  the legacy mbedtls config layout. `picoquic_create_test` calls
+  `picoquic_create(...)` with all-NULL args + zero reset seed;
+  `picoquic_free` tears it down under ASAN+UBSAN with no leaks.
+
+### Cycles 21d.1–d.3, 22a–b — daemon wiring
+
+- **21d.1** — `webtransportd --selftest` runs
+  `picoquic_create` + `picoquic_free` from the daemon binary itself
+  (no test harness). Proves the full mbedtls-backed TLS init path
+  works when statically linked into our real executable. **Note:**
+  starting the packet-loop via `picoquic_start_network_thread` trips
+  an ASAN/pthread crash on darwin-arm64 (pc=0 at thread start). See
+  [Design notes](#design-notes).
+- **21d.2** — in-process client+server handshake reaches
+  `picoquic_state_ready`. Both sides run in one test process,
+  sharing a simulated clock; packets pump synchronously via
+  `picoquic_prepare_next_packet` ↔ `picoquic_incoming_packet`. No
+  sockets, no pthread — exercises the real mbedtls handshake path
+  without the pthread-ASAN blocker.
+- **21d.3** — real-socket handshake over loopback UDP. The daemon
+  drives `picoquic_packet_loop_v3` directly on its main thread via a
+  stack-allocated `picoquic_network_thread_ctx_t` (sidesteps the
+  pthread blocker). `handshake_socket_test` launches the daemon on
+  a fixed port, binds its own UDP socket, pumps a picoquic client
+  through `sendto`/`recvfrom`, and asserts `picoquic_state_ready`
+  within a 5s budget. SIGTERM + `waitpid` tears the daemon down
+  cleanly.
+- **22a** — `--exec=<bin>` spawns the configured child the first
+  time a connection reaches ready state; the child is reaped when
+  the daemon tears down. First integration of `child_process.c` into
+  the real server pipeline. `handshake_socket_test` checks for
+  `child spawned pid=<N>` in the daemon's stdout.
+- **22b** — the `wtd_peer_session` reader thread attaches to the
+  spawned child's `stdout_fd`. Every complete frame the child writes
+  lands on the outbound work queue; the loop callback drains it each
+  iteration and prints `outbound frame: flag=… len=… payload=…`.
+  `examples/frame_hi` is a tiny deterministic child that writes one
+  `flag=0 payload="hi"` frame and exits; the test asserts the
+  decoded line appears. First integration of `peer_session.c` + the
+  reader thread into the real server.
+
 ## Next up
 
-### Cycle 21+ — Real handshake, picoquic bootstrap, end-to-end echo
+### Cycle 22c — forward client stream bytes to child stdin
 
-Cycle 21 from the original plan was too fat. Split into sub-cycles,
-each driven by one failing test:
+Currently the outbound path (child → client) has all its plumbing in
+place. Inbound (client stream → child `stdin`) is still unwired.
 
-- ✅ **21a (done)**: vendored `error_names.c` compiles with
-  `-isystem thirdparty/picoquic/picoquic` and the four Godot-style
-  defines (`PICOQUIC_WITH_MBEDTLS`, `PTLS_WITHOUT_OPENSSL`,
-  `PTLS_WITHOUT_FUSION`, `DISABLE_DEBUG_PRINTF`). Vendored TUs use
-  `-w` (sanitizers still on) so their warnings don't stop our
-  `-Werror` build.
-- ✅ **21b (done)**: every `thirdparty/picoquic/picoquic/*.c` (50 TUs,
-  minus Windows-only `winsockloop.c`) compiles under VENDOR_CFLAGS
-  with the wider include path (`picotls/include`, `mbedtls/include`,
-  `picoquic_mbedtls`, `picohttp`). `picoquic_link_test` force-builds
-  the entire object set as a prereq so any compile regression in any
-  picoquic TU turns `make test` red.
-- ✅ **21c (done)**: full vendored build + link. picohttp, picotls/lib
-  (minus certificate_compression/fusion/mbedtls/mbedtls_sign/openssl),
-  picotls/lib/cifra (minus libaegis — needs external `<aegis.h>`),
-  cifra internals (minus test drivers + curve25519.donna/.naclref;
-  curve25519.c wraps tweetnacl inline), micro-ecc, picoquic_mbedtls,
-  mbedtls/library (minus godot_core_mbedtls_platform's legacy
-  config.h layout), and loglib all compile + link. `picoquic_create_test`
-  calls `picoquic_create(8, NULL-cert, NULL-key, ..., zero_reset_seed,
-  ...)` — asserts non-NULL return, then `picoquic_free` tears it down
-  under ASAN+UBSAN without leaks.
-- ✅ **21d.1 (done)**: `webtransportd --selftest` exercises
-  `picoquic_create` + `picoquic_free` end-to-end from the daemon
-  binary (full mbedtls TLS init path) under ASAN+UBSAN. The
-  daemon now links the entire vendored object set. `selftest_test`
-  fork/execs the binary and asserts exit 0 + stdout contains
-  `selftest ok`. NOTE: starting the picoquic packet-loop thread
-  (`picoquic_start_network_thread`) currently trips an ASAN
-  thread-start crash (pc=0) on darwin-arm64; investigation deferred
-  to a focused cycle because 21d.2 doesn't need the pthread path.
-- ✅ **21d.2 (done)**: `handshake_test` creates two in-process
-  `picoquic_quic_t` contexts sharing a simulated clock (server
-  loads `thirdparty/picoquic/certs/{cert,key}.pem`, both set
-  default ALPN `"hq-test"`). `picoquic_create_client_cnx` +
-  synchronous packet pumping via `picoquic_prepare_next_packet` ↔
-  `picoquic_incoming_packet` (no sockets, no pthread) drives both
-  sides to `picoquic_state_ready` well within the 200-iteration
-  budget. Mutation-tested the client-ready assertion to prove the
-  handshake is observably complete.
-- ✅ **21d.3 (done)**: `handshake_socket_test` launches
-  `./webtransportd --server --cert=... --key=... --port=24443`,
-  waits for the `server ready` sentinel on the daemon's stdout,
-  binds its own loopback UDP socket, drives a picoquic client cnx
-  by pumping `picoquic_prepare_next_packet` ↔ `sendto` and
-  `recvfrom` ↔ `picoquic_incoming_packet` synchronously, and
-  asserts the client connection reaches `picoquic_state_ready`
-  within a 5s wall-clock budget. Then SIGTERM to the daemon +
-  `waitpid` for a clean exit. Mutation-tested on a deliberately
-  wrong port (the client never reaches ready and the EXPECT fires).
+- **RED**: test sends a reliable stream message `"world"` to the
+  daemon; daemon writes `flag=0 | varint(5) | "world"` to the
+  child's `stdin`; a small helper child reads its `stdin` and
+  copies bytes back to `stdout` (essentially `/bin/cat`); the reader
+  thread decodes the echoed frame and the test sees
+  `outbound frame: payload=world` in the daemon log.
+- **GREEN**: install a per-cnx stream-data callback in
+  `picoquic_create`; on `picoquic_callback_stream_data` call
+  `wtd_frame_encode` into a scratch buffer and `write()` to
+  `child.stdin_fd`. Same pattern for datagrams later.
 
-  Design note: the daemon drives `picoquic_packet_loop_v3`
-  directly on its main thread via a locally-initialised
-  `picoquic_network_thread_ctx_t`, not via
-  `picoquic_start_network_thread` — the latter trips the
-  darwin-arm64 ASAN/pthread_create crash documented in 21d.1
-  (function pointer zeroed when routed through
-  `picoquic_internal_thread_create` -> `picoquic_create_thread`,
-  but intact when `pthread_create` is called directly). The
-  synchronous approach also simplifies SIGTERM handling (atomic
-  flag + `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP` from the
-  loop callback).
-- **21e (bootstrap)**: `picoquic_create` with server cert+key (or
-  `--cert=auto` self-signed), `picoquic_set_alpn_select_fn_v2`,
-  `picowt_set_default_transport_parameters`,
-  `picoquic_start_network_thread`.
-- **21f (path callback)**: register `_wt_session_path_callback` that
-  on CONNECT exec's the configured child, allocates a `peer_session_t`,
-  stores it in `path_callback_ctx`, and wires incoming stream/datagram
-  frames to the child's stdin via the framing codec.
-- **21g (echo)**: end-to-end echo test — the client sends a datagram
-  + a stream message; the daemon pipes both through `/bin/cat` (or a
-  small echo helper); the client receives identical bytes back in the
-  same mode (unreliable ↔ unreliable, reliable ↔ reliable). GREEN
-  drains the per-peer outbound work queue from the picoquic loop
-  callback on `picoquic_packet_loop_wake_up` and dispatches to
-  `picoquic_add_to_stream` / `picoquic_queue_datagram_frame`.
+### Cycle 22d — end-to-end echo
 
-### Cycle N — Graceful shutdown
+Combine 22b + 22c: daemon sends the decoded outbound payload back on
+the same QUIC stream. Test asserts the client receives its own
+`"world"` bytes. This is the original TODO's stated v0.1 goal.
 
-- **RED**: `SIGTERM` the daemon; all in-flight sessions close, all
-  child processes are reaped, daemon exits 0, no ASAN leaks.
-- **GREEN**: install `sigaction(SIGTERM, …)` that sets an atomic
-  `should_exit` flag and calls `picoquic_wake_up_network_thread`; the
-  loop callback checks the flag and returns
-  `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`. After the loop thread
-  joins, free all `peer_session_t`s (each one SIGTERMs its child +
-  closes the work queue) before `picoquic_free`.
+### Cycle 22e — datagrams
+
+Symmetry: flag=1 frames ↔ WebTransport datagrams. `picoquic_queue_datagram_frame`
+on the daemon side; test opens an unreliable flow and round-trips.
+
+### Cycle N — Graceful shutdown on real multi-cnx load
+
+21d.3's daemon handles a single connection and self-exits after 200 ms
+of ready state. Production: accept many, handle SIGTERM cleanly with
+every in-flight session drained and every child reaped, no ASAN leaks.
+
+## Design notes
+
+### The darwin-arm64 ASAN/pthread_create blocker
+
+`picoquic_start_network_thread` trips a NULL-function-pointer crash
+inside ASAN's `pthread_create` interceptor on darwin-arm64:
+
+```
+ERROR: AddressSanitizer: SEGV on unknown address (pc 0x0 T1)
+    #0  0x0  (<unknown module>)
+    #1  asan_thread_start+0x4c
+    #2  _pthread_start+0x84
+```
+
+Narrowed with a minimal repro: the function pointer to
+`picoquic_packet_loop_v3` reaches `pthread_create` **intact** when
+called directly — the thread starts and crashes on NULL deref inside
+the function body (expected; NULL arg). But the pointer becomes zero
+when routed through picoquic's two-level indirection
+(`picoquic_internal_thread_create` → `picoquic_create_thread` →
+`pthread_create`). Suspected arm64 vs arm64e ABI / PAC interaction
+with the ASAN runtime. Not blocking anything we need — the
+synchronous loop pattern is cleaner anyway.
+
+### Synchronous packet loop on main thread
+
+Instead of `picoquic_start_network_thread`, the daemon builds a
+`picoquic_network_thread_ctx_t` on the main-thread stack, wires its
+`loop_callback` + `loop_callback_ctx`, and invokes
+`picoquic_packet_loop_v3(&tctx)` directly. SIGTERM flips an atomic
+`g_should_exit` flag that the loop callback checks on each call to
+return `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`. No pthread, no
+`picoquic_wake_up_network_thread`, no thread-join dance — one event
+loop with one exit path.
 
 ## After the daemon works
 
@@ -153,41 +192,34 @@ each driven by one failing test:
   `AUTHORS`, `CHANGES`.
 - **Examples**: `examples/echo.c` (smallest compliant child),
   `examples/echo.sh` + `examples/frame-helper.sh` (shell-friendly
-  framing helpers).
+  framing helpers). `examples/frame_hi.c` already exists as the
+  cycle-22b test helper.
 
 ## Future cycles (once v0.1 ships)
 
-- **RED**: fuzz harness for the frame codec (libFuzzer against
-  `wtd_frame_decode`; should never crash or report
-  heap-buffer-overflow under ASAN).
-- **RED**: `--cert=auto` persistence — generated cert+key survive a
-  daemon restart.
-- **RED**: per-peer flow control — if the child's stdin pipe is full,
-  apply WT stream flow-control backpressure instead of dropping
-  unreliable frames.
-- **RED**: 8-byte varint support + a configurable
-  `WTD_FRAME_MAX_PAYLOAD` so large reliable payloads don't force a
-  session close.
-- **RED**: a real Windows `child_process_win.c` (today's
-  implementation is POSIX-only; Windows ships the daemon binary but
-  not the child-plumbing path yet).
-- **RED**: stderr-from-child forwarding to `wtd_log` (currently the
-  `stderr_fd` pipe is opened but unread).
-- **RED**: `--dir` / `--staticdir` equivalents — serve static files
-  on non-WT paths for the devconsole case, mirroring
-  websocketd's `http.go`.
+- Fuzz harness for the frame codec (libFuzzer against
+  `wtd_frame_decode`; must never crash or report OOB under ASAN).
+- `--cert=auto` persistence — generated cert+key survive restart.
+- Per-peer flow control: apply WT stream backpressure when the
+  child's stdin pipe fills, instead of dropping unreliable frames.
+- 8-byte varint support + configurable `WTD_FRAME_MAX_PAYLOAD` so
+  large reliable payloads don't force session close.
+- Real `child_process_win.c` (today's impl is POSIX-only).
+- Forward child `stderr_fd` to `wtd_log` (currently opened but unread).
+- `--dir` / `--staticdir` — serve static files on non-WT paths for
+  devconsole, mirroring websocketd's `http.go`.
 
-## Guiding principles (keep revisiting)
+## Guiding principles
 
 - **RED first, always.** Before writing code, write a test that
-  compiles (or add only the bare symbol to make it compile) and
-  fails at runtime. Mutation-test characterization cycles
-  (ones that pass on first run) by briefly breaking the code to
-  prove the assertions are load-bearing.
-- **Narrow the slice.** Each cycle should be one public behavior.
-  If a RED needs two implementation changes to turn green, split it.
+  compiles (or add only the bare symbol to make it compile) and fails
+  at runtime. Mutation-test characterization cycles (ones that pass
+  on first run) by briefly breaking the code to prove the assertions
+  are load-bearing.
+- **Narrow the slice.** Each cycle is one public behavior. If a RED
+  needs two implementation changes to turn green, split it.
 - **ASAN is part of the contract.** `-fsanitize=address,undefined`
-  runs every `make test` — an ASAN finding is a RED, not a warning.
+  runs on every `make test`; an ASAN finding is a RED, not a warning.
 - **Commit every green.** One commit per cycle (or tightly-paired
   cycle), message starts with `Cycle N: …` so the TDD arc is visible
   in `git log`.

@@ -6,6 +6,10 @@
 /webtransportd
 /webtransportd.dSYM/
 
+# Example helper binaries
+/examples/frame_hi
+/examples/frame_hi.dSYM/
+
 # Object files
 *.o
 *.obj
