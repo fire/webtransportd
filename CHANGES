@@ -119,3 +119,16 @@ Portability and CI (cycles 35–39)
   -std=c11 (macOS headers hid the bug locally). Wrapped the
   POSIX-only helpers in child_process_test.c in #ifndef _WIN32
   so pid-as-HANDLE doesn't break the compile under mingw.
+* Win32 `child_process.c` (cycle 37) — `CreatePipe` ×3 with
+  `SetHandleInformation` on the parent-side ends, `CreateProcessA`
+  with `STARTF_USESTDHANDLES`, `_open_osfhandle` wraps the pipe
+  handles so the daemon's existing read/write/close calls still
+  work. `WTD_CHILD_PID_NONE` hides the pid_t vs HANDLE switch from
+  callers.
+* Deterministic daemon-launch ports in tests (cycle 33) —
+  the three tests that fork/exec `./webtransportd` now derive their
+  port from the test process's pid: `20000 + (getpid() & 0x1fff)`.
+  A stale daemon from a previous failed run lands on a different
+  port once its pid is reused; odds of two concurrent test runs
+  colliding are ~1/8000. Could still be tightened by adding
+  `--port=0` + printing the bound port from the daemon.

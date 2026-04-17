@@ -13,16 +13,16 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 
 ## Status at a glance
 
-| Module          | Cycles | Subject                                                              |
-| --------------- | :----: | -------------------------------------------------------------------- |
-| `frame`         | 1–11, 24–25, 34 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness; shell framing helper |
-| `log`           | 12, 28 | Level filter, thread-safe mutex-guarded stderr emit, `[LEVEL]` prefix |
-| `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
-| `child_process` | 16, 37 | POSIX `fork + execvp` + Win32 `CreateProcessA` + `CreatePipe`; 3 pipes, SIGTERM / TerminateProcess + reap |
-| `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
-| `thirdparty/`   | 21a–c, 38 | Vendored picoquic + picohttp + picotls + mbedtls compile and link; Makefile ordering so CI builds from clean |
-| `webtransportd` | 19–30, 33 | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list + richer `--help` + pid-derived port for test isolation |
-| ship prep       | 31–36  | `LICENSE`, `examples/echo.c`, `examples/frame-helper.sh`, `AUTHORS`, `CHANGES`, CI workflow (linux/macOS/Windows) |
+| Module          |     Cycles      | Subject                                                                                                                                              |
+| --------------- | :-------------: | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `frame`         | 1–11, 24–25, 34 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness; shell framing helper                                               |
+| `log`           |     12, 28      | Level filter, thread-safe mutex-guarded stderr emit, `[LEVEL]` prefix                                                                                |
+| `env`           |      13–15      | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                                                                                                     |
+| `child_process` |     16, 37      | POSIX `fork + execvp` + Win32 `CreateProcessA` + `CreatePipe`; 3 pipes, SIGTERM / TerminateProcess + reap                                            |
+| `peer_session`  |      17–18      | Mutex-guarded FIFO work queue + reader thread that decodes frames                                                                                    |
+| `thirdparty/`   |    21a–c, 38    | Vendored picoquic + picohttp + picotls + mbedtls compile and link; Makefile ordering so CI builds from clean                                         |
+| `webtransportd` |    19–30, 33    | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list + richer `--help` + pid-derived port for test isolation |
+| ship prep       |      31–36      | `LICENSE`, `examples/echo.c`, `examples/frame-helper.sh`, `AUTHORS`, `CHANGES`, CI workflow (linux/macOS/Windows)                                    |
 
 All work lives in one directory under ASAN+UBSAN. 16 test binaries green:
 
@@ -53,7 +53,6 @@ Moved to [CHANGES](CHANGES) — one entry per cycle, grouped by phase.
 Read there for the development history; this file tracks state and
 what's next.
 
-
 ## Wanted (Pareto frontier by value/effort)
 
 Nothing blocking the v0.1 echo — the daemon handshakes, round-trips
@@ -66,7 +65,7 @@ down, and each one unlocks a distinct capability.
 
 ### Frontier
 
-1. **Windows UTF-8 parity.** *Effort: medium. Value: required.*
+1. **Windows UTF-8 parity.** _Effort: medium. Value: required._
    Windows is a first-class target, not best-effort — UTF-8 paths,
    argv, env, and child-stdin/stdout must round-trip identically to
    POSIX. Concrete pieces:
@@ -90,13 +89,13 @@ down, and each one unlocks a distinct capability.
    - `--version` / `--help` output should also round-trip UTF-8
      sentinel bytes without mojibake on Windows.
 2. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
-   *Effort: low. Value: low–medium.* Cycle 25 already added the
+   _Effort: low. Value: low–medium._ Cycle 25 already added the
    decode side — mirror it on the encoder and bump the max above
    `2^30` so large reliable payloads don't force a session close.
    Smallest behavioural test: encode a `2^30`-byte payload via a
    synthetic wrapper (no 1 GB buffer needed). On the frontier
    because nothing else comes close to this little effort.
-3. **`--cert=auto`.** *Effort: medium. Value: high.* Generate a
+3. **`--cert=auto`.** _Effort: medium. Value: high._ Generate a
    self-signed cert+key in-memory via mbedtls so the daemon boots
    without a PEM pair on disk — the single biggest UX win for
    first-time operators. Uses `mbedtls_x509write_crt_*` +
@@ -104,18 +103,18 @@ down, and each one unlocks a distinct capability.
    `picoquic_set_tls_certificate_chain` / `picoquic_set_tls_key`
    pair. Opens the door to `--cert=auto` **persistence** as a
    follow-up (survives restart).
-4. **`--dir=<path>` / `--staticdir=<path>`.** *Effort: medium.
-   Value: high.* Serve static files on non-WT request paths,
+4. **`--dir=<path>` / `--staticdir=<path>`.** _Effort: medium.
+   Value: high._ Serve static files on non-WT request paths,
    mirroring websocketd's `http.go`. Unlocks the devconsole story
    (ship a browser client alongside the daemon in one process).
    Independent hot path from `--cert=auto`, so the two don't trade
    off against each other.
-5. **`README.md`.** *Effort: medium. Value: high.* Usage,
+5. **`README.md`.** _Effort: medium. Value: high._ Usage,
    framing spec, CLI flags, relationship to Godot, quickstart.
    The single biggest adoption lever once `--cert=auto` lands.
    (The harness rule deliberately blocks this from going first —
    write docs against the real behaviour, not plans.)
-6. **Per-peer flow control.** *Effort: high. Value: high.* When a
+6. **Per-peer flow control.** _Effort: high. Value: high._ When a
    child's stdin pipe fills, the current `write_all` blocks the
    packet loop thread. Detect partial writes, stash the remaining
    frame on the peer, and apply WT stream-level backpressure
@@ -152,22 +151,6 @@ in without a reason:
   second Windows toolchain costs matrix time without enabling
   anything the first one doesn't. Revisit if a user actually
   needs an MSVC-linked `.exe`.
-
-### Done (moved out of Wanted)
-
-- ✅ **Win32 `child_process.c`** (cycle 37) — `CreatePipe` ×3 with
-  `SetHandleInformation` on the parent-side ends, `CreateProcessA`
-  with `STARTF_USESTDHANDLES`, `_open_osfhandle` wraps the pipe
-  handles so the daemon's existing read/write/close calls still
-  work. `WTD_CHILD_PID_NONE` hides the pid_t vs HANDLE switch from
-  callers.
-- ✅ **Deterministic daemon-launch ports in tests** (cycle 33) —
-  the three tests that fork/exec `./webtransportd` now derive their
-  port from the test process's pid: `20000 + (getpid() & 0x1fff)`.
-  A stale daemon from a previous failed run lands on a different
-  port once its pid is reused; odds of two concurrent test runs
-  colliding are ~1/8000. Could still be tightened by adding
-  `--port=0` + printing the bound port from the daemon.
 
 ## Design notes
 
