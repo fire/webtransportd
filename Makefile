@@ -60,6 +60,13 @@ examples/frame_hi: examples/frame_hi.c
 	@echo "  CC     $@"
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+# Cycle 32: reference C child — reads framed stdin, re-encodes
+# payload with same flag, writes framed stdout. Links frame.c for
+# the codec so operators can use it as a starting point.
+examples/echo: examples/echo.c frame.c frame.h
+	@echo "  CC     $@ (reference child + frame.c)"
+	$(CC) $(CFLAGS) -I . -o $@ examples/echo.c frame.c $(LDFLAGS)
+
 # version_test fork/execs ./webtransportd, so it needs that binary built
 # first. The test compiles standalone (no matching version.c).
 version_test: version_test.c version.h webtransportd
@@ -236,10 +243,13 @@ handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $
 		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
 # Cycle 22c: end-to-end daemon-internal echo. Client sends bytes on a
-# QUIC stream; daemon frames them into /bin/cat's stdin; the reader
-# thread reads cat's stdout, decodes the frame, and logs the payload.
-handshake_echo_test: handshake_echo_test.c webtransportd $(VENDOR_ALL_OBJS)
-	@echo "  CC     $@ (loopback UDP echo via /bin/cat)"
+# QUIC stream; daemon frames them into the child's stdin; the reader
+# thread reads the child's stdout, decodes the frame, and logs the
+# payload. Cycle 32 switched the child from /bin/cat to the new
+# reference child at examples/echo (byte-equivalent output, but
+# actually exercises the frame codec on the child side too).
+handshake_echo_test: handshake_echo_test.c webtransportd examples/echo $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (loopback UDP echo via examples/echo)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
@@ -268,7 +278,9 @@ test: $(TESTS_BIN)
 	@echo "  OK     all tests passed"
 
 clean:
-	rm -f $(TESTS_BIN) webtransportd examples/frame_hi *.o
+	rm -f $(TESTS_BIN) webtransportd \
+		examples/frame_hi examples/echo \
+		*.o
 	rm -f thirdparty/picoquic/picoquic/*.o
 	rm -f thirdparty/picoquic/picohttp/*.o
 	rm -f thirdparty/picoquic/picoquic_mbedtls/*.o

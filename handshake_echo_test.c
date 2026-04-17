@@ -1,14 +1,23 @@
 /* TDD log:
  * - Cycle 22c: daemon-internal echo visible on daemon stdout.
  * - Cycle 22d: client-visible stream echo.
- * - Cycle 22e (this commit): datagram round-trip. Client enables
- *   picoquic's datagram transport parameter, sends "dgram" via
+ * - Cycle 22e: datagram round-trip. Client enables picoquic's
+ *   datagram transport parameter, sends "dgram" via
  *   picoquic_queue_datagram_frame in addition to the stream
  *   "world", and the client callback accumulates stream bytes
  *   and datagram bytes separately. Server-side: a flag=1 frame
  *   on the peer_session work queue gets echoed via
  *   picoquic_queue_datagram_frame instead of
  *   picoquic_add_to_stream.
+ *
+ * - Cycle 32: child switched from /bin/cat to ./examples/echo, a
+ *   real C reference child that decodes framed stdin with
+ *   wtd_frame_decode and re-encodes the payload with the same
+ *   flag via wtd_frame_encode. Output is byte-equivalent to
+ *   /bin/cat (both encoders produce shortest-form varints) but
+ *   the round trip now exercises the frame codec on the child
+ *   side too, proving the published framing spec matches what
+ *   the codec emits.
  */
 
 #include "picoquic.h"
@@ -97,7 +106,7 @@ static int spawn_daemon(daemon_t *out) {
 			(char *)"--cert=thirdparty/picoquic/certs/cert.pem",
 			(char *)"--key=thirdparty/picoquic/certs/key.pem",
 			port_buf,
-			(char *)"--exec=/bin/cat",
+			(char *)"--exec=./examples/echo",
 			NULL,
 		};
 		execvp(argv[0], argv);

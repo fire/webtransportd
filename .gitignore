@@ -9,6 +9,8 @@
 # Example helper binaries
 /examples/frame_hi
 /examples/frame_hi.dSYM/
+/examples/echo
+/examples/echo.dSYM/
 
 # Object files
 *.o

@@ -280,10 +280,11 @@ useful slices, rough order of leverage-per-effort:
   relationship to Godot); ✅ `LICENSE` shipped in cycle 31
   (BSD-2 for our code, vendored libs keep their upstream terms);
   `AUTHORS`, `CHANGES`.
-- **Examples**: `examples/echo.c` (smallest compliant child),
-  `examples/echo.sh` + `examples/frame-helper.sh` (shell-friendly
-  framing helpers). `examples/frame_hi.c` already exists as the
-  cycle-22b test helper.
+- **Examples**: ✅ `examples/echo.c` shipped in cycle 32 (minimal
+  C reference child — decode framed stdin, re-encode to framed
+  stdout). Still wanted: `examples/echo.sh` + `examples/frame-helper.sh`
+  (shell-friendly framing helpers). `examples/frame_hi.c` already
+  exists as the cycle-22b test helper.
 
 ## Design notes
 
