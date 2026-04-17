@@ -310,6 +310,14 @@ cmdline_test: cmdline_test.c cmdline.c cmdline.h
 	@echo "  CC     $@ (cmdline.c + $<)"
 	$(CC) $(CFLAGS) -o $@ cmdline.c cmdline_test.c $(LDFLAGS)
 
+# Cycle 40b: child_process.c calls wtd_build_cmdline on Windows. The
+# default %_test pattern only links child_process.c, so the Win32
+# path goes unresolved under mingw. Explicit rule pulls cmdline.c in.
+child_process_test: child_process_test.c child_process.c child_process.h \
+                    cmdline.c cmdline.h
+	@echo "  CC     $@ (child_process.c + cmdline.c + $<)"
+	$(CC) $(CFLAGS) -o $@ child_process.c cmdline.c child_process_test.c $(LDFLAGS)
+
 # Cycle 42: autocert_test links the full mbedtls TU set because the
 # X.509 write path (autocert.c itself) pulls in mbedtls_x509write +
 # mbedtls_pk + mbedtls_ecp + mbedtls_entropy, and the parse-side
