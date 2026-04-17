@@ -319,56 +319,95 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   both helpers in `#ifndef _WIN32`. A dedicated Win32 unit
   test using `cmd.exe` + `findstr` remains on the wanted list.
 
-## Wanted (roughly prioritized)
+## Wanted (Pareto frontier by value/effort)
 
 Nothing blocking the v0.1 echo — the daemon handshakes, round-trips
 streams + datagrams through a child process, forwards child stderr,
-and keeps concurrent clients isolated. These are the next genuinely
-useful slices, rough order of leverage-per-effort:
+and keeps concurrent clients isolated. The list below is the Pareto
+frontier: for each item there is nothing else on the board that is
+simultaneously higher-value **and** lower-effort. Pick what fits
+your time budget; items above are increasing in effort as you go
+down, and each one unlocks a distinct capability.
 
-1. **`--cert=auto`** — generate a self-signed cert+key in-memory via
-   mbedtls so the daemon boots without a PEM pair on disk. Uses
-   `mbedtls_x509write_crt_*` + `mbedtls_pk_write_key_der` + the
-   existing `picoquic_set_tls_certificate_chain` /
-   `picoquic_set_tls_key` pair. Opens the door to `--cert=auto`
-   **persistence** as a follow-up (survives restart).
-2. **Per-peer flow control.** When a child's stdin pipe fills, the
-   current `write_all` just blocks the packet loop thread. Detect
-   partial writes, stash the remaining frame on the peer, and apply
-   WT stream-level backpressure instead of ever blocking the loop.
-   For datagrams: drop + metric on overflow (already unreliable).
-3. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
-   Cycle 25 already added the decode side. Extend `varint_encode`
-   and bump MAX above 2^30 so large reliable payloads don't force
-   a session close. Smallest behavioural test: encode a 2^30-byte
-   payload via a synthetic wrapper (no 1 GB buffer needed).
-4. ✅ **`child_process.c` Win32 path (cycle 37).** `#ifdef _WIN32`
-   in the same file: `CreatePipe` ×3 with `SetHandleInformation`
-   on the parent-side ends, `CreateProcessA` with
-   `STARTF_USESTDHANDLES`, `_open_osfhandle` wraps the pipe
-   handles so the daemon's existing read/write/close calls still
-   work. `WTD_CHILD_PID_NONE` in child_process.h hides the pid_t
-   vs HANDLE switch from callers. `child_process_test.c` is still
-   POSIX-only (uses /bin/cat); the handshake tests cover the
-   Win32 path once their portability lands. Remaining: a dedicated
-   Win32 unit test using cmd.exe + findstr, and CreateProcess**W**
-   with a UTF-16 command line for non-ASCII paths.
-5. **`--dir=<path>` / `--staticdir=<path>`** — serve static files
-   on non-WT request paths, mirroring websocketd's `http.go`.
-   Needed for the devconsole story.
-6. **libFuzzer-driven frame fuzz.** Cycle 24 is a deterministic
-   random harness; coverage-guided fuzz catches the rare-prefix
-   bug much faster. Needs a `LLVMFuzzerTestOneInput` shim and a
-   seed corpus; build with `-fsanitize=fuzzer`.
-7. ✅ **Deterministic daemon-launch in tests (cycle 33).** The
-   three tests that fork/exec `./webtransportd` on a port
-   (`handshake_socket_test`, `handshake_echo_test`,
-   `handshake_multi_test`) now derive their port from the test
-   process's pid: `20000 + (getpid() & 0x1fff)`. A stale daemon
-   from a previous failed run lands on a different port once its
-   pid is reused, and the odds of two concurrent test runs picking
-   the same port are ~1/8000. Could still be tightened by adding
-   `--port=0` + printing the bound port from the daemon.
+### Frontier
+
+1. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
+   *Effort: low. Value: low–medium.* Cycle 25 already added the
+   decode side — mirror it on the encoder and bump the max above
+   `2^30` so large reliable payloads don't force a session close.
+   Smallest behavioural test: encode a `2^30`-byte payload via a
+   synthetic wrapper (no 1 GB buffer needed). On the frontier
+   because nothing else comes close to this little effort.
+2. **`--cert=auto`.** *Effort: medium. Value: high.* Generate a
+   self-signed cert+key in-memory via mbedtls so the daemon boots
+   without a PEM pair on disk — the single biggest UX win for
+   first-time operators. Uses `mbedtls_x509write_crt_*` +
+   `mbedtls_pk_write_key_der` + the existing
+   `picoquic_set_tls_certificate_chain` / `picoquic_set_tls_key`
+   pair. Opens the door to `--cert=auto` **persistence** as a
+   follow-up (survives restart).
+3. **`--dir=<path>` / `--staticdir=<path>`.** *Effort: medium.
+   Value: high.* Serve static files on non-WT request paths,
+   mirroring websocketd's `http.go`. Unlocks the devconsole story
+   (ship a browser client alongside the daemon in one process).
+   Independent hot path from `--cert=auto`, so the two don't trade
+   off against each other.
+4. **`README.md`.** *Effort: medium. Value: high.* Usage,
+   framing spec, CLI flags, relationship to Godot, quickstart.
+   The single biggest adoption lever once `--cert=auto` lands.
+   (The harness rule deliberately blocks this from going first —
+   write docs against the real behaviour, not plans.)
+5. **Per-peer flow control.** *Effort: high. Value: high.* When a
+   child's stdin pipe fills, the current `write_all` blocks the
+   packet loop thread. Detect partial writes, stash the remaining
+   frame on the peer, and apply WT stream-level backpressure
+   instead of ever blocking the loop. For datagrams: drop + metric
+   on overflow (already unreliable). On the frontier despite the
+   effort because nothing else is both higher-value AND lower-
+   effort — it's the last correctness ceiling under load.
+
+### Dominated (skip or postpone)
+
+Items that another item beats on both axes, or that existing work
+already covers — worth keeping a note on so they don't sneak back
+in without a reason:
+
+- **libFuzzer-driven frame fuzz.** Cycle 24's deterministic harness
+  already fuzzes 20,000 decodes + 2,000 round-trips under ASAN per
+  run. Coverage-guided fuzz would find rare-prefix bugs faster, but
+  cycle 24 has found none to date — marginal value until it starts
+  missing things. Revisit if a wild-input bug sneaks past it.
+- **Dedicated Win32 `child_process` unit test (cmd.exe + findstr).**
+  The Win32 path (cycle 37) is exercised transitively by the
+  handshake tests once those port to Windows. Adding a second
+  Windows-only unit test before then is duplicated plumbing.
+- **`examples/echo.sh`.** `examples/echo.c` is the reference child,
+  and `examples/frame-helper.sh` is the shell-side framing demo —
+  together they already cover both reasons an operator would want a
+  shell echo.
+- **`Makefile.win` + `sources.mk`.** The existing `Makefile` under
+  MSYS2 already proves Windows builds in CI (cycle 36). A dedicated
+  nmake path would duplicate the source list without enabling a new
+  toolchain we can't already use.
+- **`CreateProcessW` with UTF-16 command line.** Only meaningful
+  for non-ASCII executable paths, which no current operator has
+  asked for. Revisit when someone files a bug.
+
+### Done (moved out of Wanted)
+
+- ✅ **Win32 `child_process.c`** (cycle 37) — `CreatePipe` ×3 with
+  `SetHandleInformation` on the parent-side ends, `CreateProcessA`
+  with `STARTF_USESTDHANDLES`, `_open_osfhandle` wraps the pipe
+  handles so the daemon's existing read/write/close calls still
+  work. `WTD_CHILD_PID_NONE` hides the pid_t vs HANDLE switch from
+  callers.
+- ✅ **Deterministic daemon-launch ports in tests** (cycle 33) —
+  the three tests that fork/exec `./webtransportd` now derive their
+  port from the test process's pid: `20000 + (getpid() & 0x1fff)`.
+  A stale daemon from a previous failed run lands on a different
+  port once its pid is reused; odds of two concurrent test runs
+  colliding are ~1/8000. Could still be tightened by adding
+  `--port=0` + printing the bound port from the daemon.
 
 ## Ship prep
 
