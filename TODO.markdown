@@ -91,8 +91,19 @@ each driven by one failing test:
   `./webtransportd` as a subprocess with a server cert+key,
   opens a real loopback UDP socket with its own picoquic client,
   and asserts a WebTransport CONNECT reaches
-  `picoquic_state_server_ready`. Also the natural place to debug
-  and fix the pthread_create / ASAN crash.
+  `picoquic_state_ready`.
+  Blocked by the ASAN pthread issue: the function-pointer to
+  `picoquic_packet_loop_v3` gets zeroed when it routes through
+  picoquic's two-level indirection
+  (`picoquic_internal_thread_create` -> `picoquic_create_thread` ->
+  `pthread_create`) but reaches the function fine when
+  pthread_create is called directly. Reproduced with a minimal
+  standalone binary linking the full vendored objs; suspected
+  arm64 vs arm64e ABI/PAC interaction with the ASAN runtime.
+  Design workaround for this slice: skip `picoquic_start_network_thread`
+  entirely and call `picoquic_packet_loop_v3` synchronously on the
+  daemon's main thread (single-threaded loop, `should_exit` flag
+  returns `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`).
 - **21e (bootstrap)**: `picoquic_create` with server cert+key (or
   `--cert=auto` self-signed), `picoquic_set_alpn_select_fn_v2`,
   `picowt_set_default_transport_parameters`,
