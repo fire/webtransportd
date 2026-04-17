@@ -24,6 +24,7 @@
 #include "pico_webtransport.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
@@ -80,7 +81,12 @@ typedef struct server_ctx {
 	const char *dir_path;
 	wtd_peer_t *peers;
 	picohttp_server_path_item_t *path_items;
+	picoquic_network_thread_ctx_t *net_thread_ctx;
 } server_ctx_t;
+
+static void on_reader_ready(void *ctx) {
+	picoquic_wake_up_network_thread((picoquic_network_thread_ctx_t *)ctx);
+}
 
 static void on_sigterm(int sig) {
 	(void)sig;
@@ -110,7 +116,8 @@ static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
 	}
 
 	if (wtd_peer_session_start_reader(&p->session, p->child.stdout_fd,
-			NULL, NULL) != 0) {
+			sctx->net_thread_ctx ? on_reader_ready : NULL,
+			sctx->net_thread_ctx) != 0) {
 		wtd_log(WTD_LOG_ERROR, "peer_session_start_reader failed");
 		wtd_child_terminate(&p->child);
 		wtd_peer_session_destroy(&p->session);
@@ -400,7 +407,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	server_param.path_table = path_items;
 	server_param.path_table_nb = 1;
 
-	server_ctx_t sctx = { exec_path, dir_path, NULL, path_items };
+	server_ctx_t sctx = { exec_path, dir_path, NULL, path_items, NULL };
 	path_items[0].path_app_ctx = &sctx;
 
 	int use_autocert = (cert != NULL && strcmp(cert, "auto") == 0);
@@ -478,10 +485,34 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	tctx.loop_callback = server_loop_cb;
 	tctx.loop_callback_ctx = &sctx;
 
+#ifdef _WIN32
+	tctx.wake_up_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (tctx.wake_up_event != NULL) {
+		tctx.wake_up_defined = 1;
+	}
+#else
+	if (pipe(tctx.wake_up_pipe_fd) == 0) {
+		int wflags = fcntl(tctx.wake_up_pipe_fd[1], F_GETFL, 0);
+		fcntl(tctx.wake_up_pipe_fd[1], F_SETFL, wflags | O_NONBLOCK);
+		tctx.wake_up_defined = 1;
+	}
+#endif
+	sctx.net_thread_ctx = &tctx;
+
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
 
 	picoquic_free(quic);
+
+	if (tctx.wake_up_defined) {
+#ifdef _WIN32
+		CloseHandle(tctx.wake_up_event);
+#else
+		close(tctx.wake_up_pipe_fd[0]);
+		close(tctx.wake_up_pipe_fd[1]);
+#endif
+		tctx.wake_up_defined = 0;
+	}
 
 	if (rc == PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP || rc == 0 ||
 			atomic_load(&g_should_exit)) {
