@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 21a: minimal linkage check against vendored picoquic.
  *   picoquic_error_name(PICOQUIC_TRANSPORT_INTERNAL_ERROR) must return

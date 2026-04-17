@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /*
  * Tiny deterministic child used by handshake_socket_test:
  *  1. Writes "oops\n" to stderr (cycle 23: daemon forwards this via

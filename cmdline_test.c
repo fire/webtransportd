@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 40b (this file): wtd_build_cmdline must emit an MSDN-
  *   compliant quoted-argv string so CommandLineToArgvW parses it

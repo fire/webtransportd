@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, K. S. Ernest (iFire) Lee
 # examples/frame-helper.sh — emit one webtransportd frame to stdout.
 #
 # usage:  frame-helper.sh <flag> <payload>

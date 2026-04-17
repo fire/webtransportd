@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 24 (this file): deterministic fuzz harness for the frame
  *   codec. Two passes:

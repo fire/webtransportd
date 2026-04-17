@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* Resource script: bind the UTF-8 activeCodePage manifest into
  * webtransportd.exe. Resource ID 1 + type 24 (RT_MANIFEST) is the
  * magic pair Windows looks up when it loads an .exe, so with this

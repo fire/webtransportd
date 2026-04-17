@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 13: env_build returns a NULL-terminated envp[] containing
  *   WEBTRANSPORT_REMOTE_ADDR.

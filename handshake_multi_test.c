@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 #ifdef _WIN32
 /* POSIX-only test (fork+exec / sys/wait / arpa/inet). Cross-
  * compilation on mingw would need CreateProcess + Winsock

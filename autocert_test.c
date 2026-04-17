@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* Cycle 42: autocert generator produces a parseable, self-signed
  * ECDSA cert + key pair. Unit test uses mbedtls's own parsers to
  * validate the output against its documented contract:

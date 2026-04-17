@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 21c: vendored picoquic + picohttp + picotls + mbedtls all
  *   compile and link together. picoquic_create(...) with a zero reset

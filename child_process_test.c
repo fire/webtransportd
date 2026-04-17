@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 16 (this file): wtd_child_spawn forks/exec's a child program
  *   with three pipes (stdin/stdout/stderr). We use /bin/cat as the

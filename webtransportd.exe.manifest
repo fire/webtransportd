@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- SPDX-License-Identifier: BSD-2-Clause -->
+<!-- Copyright (c) 2026, K. S. Ernest (iFire) Lee -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity name="webtransportd" version="0.1.0.0" type="win32"/>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (c) 2026, K. S. Ernest (iFire) Lee */
 /* TDD log:
  * - Cycle 1: encode "hi" reliable, expect [0x00, 0x02, 'h', 'i'].
  * - Cycle 2: decode round-trips the same bytes back to flag + payload.
