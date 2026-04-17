@@ -7,7 +7,15 @@
 CC      ?= cc
 # ASAN catches the latent OOB read that an "INCOMPLETE" decode could otherwise
 # get away with by accident. -fno-omit-frame-pointer keeps stack traces clean.
+#
+# _GNU_SOURCE exposes strdup/setenv/unsetenv/environ from glibc headers under
+# -std=c11 (without it, glibc hides POSIX-2008 symbols and -Werror turns the
+# implicit decls into hard errors — macOS/clang doesn't enforce this, which
+# hid the bug locally until the linux-gcc CI job caught it). _DARWIN_C_SOURCE
+# re-enables BSD extensions on Darwin when _POSIX_C_SOURCE-style macros are
+# active; it's a no-op elsewhere. Both macros are harmless on mingw.
 CFLAGS  ?= -O0 -g -Wall -Wextra -Werror -std=c11 \
+           -D_GNU_SOURCE -D_DARWIN_C_SOURCE \
            -fsanitize=address,undefined -fno-omit-frame-pointer -pthread
 LDFLAGS ?= -fsanitize=address,undefined -pthread
 

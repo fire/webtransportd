@@ -16,6 +16,7 @@ static int failures = 0;
 #define FAIL(msg) do { fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, msg); failures++; } while (0)
 #define EXPECT(cond) do { if (!(cond)) FAIL(#cond); } while (0)
 
+#ifndef _WIN32
 /* Read exactly `want` bytes from fd, retrying short reads. Returns 0 on
  * full read or -1 on error/EOF. */
 static int read_full(int fd, void *buf, size_t want) {
@@ -57,6 +58,7 @@ static void cycle16_cat_echo(void) {
 	wtd_child_terminate(&child);
 	EXPECT(child.pid == -1); /* terminate clears the pid */
 }
+#endif /* !_WIN32 */
 
 int main(void) {
 #ifdef _WIN32
