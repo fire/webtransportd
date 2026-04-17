@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–23  | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–26  | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
 All work lives in one directory under ASAN+UBSAN. 13 test binaries green:
 
@@ -167,6 +167,15 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   there too. Encoder still always picks the shortest form —
   extending it to emit 8-byte when `WTD_FRAME_MAX_PAYLOAD` rises
   above 2^30 is a future cycle.
+- **26** — **SIGTERM is the only shutdown.** Removed the "exit
+  1 s after the first ready state" timer that was a testing
+  convenience. The daemon's packet loop now runs until SIGTERM/
+  SIGINT flips `g_should_exit`; tests were already sending
+  SIGTERM at the end of their scenarios so nothing observable
+  regressed. Clears one of the odder production behaviours
+  (a daemon that self-terminated was surprising) and lets the
+  same build serve multiple concurrent handshakes once the
+  per-cnx peer_session split arrives.
 
 ## Next up
 

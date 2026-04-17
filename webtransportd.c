@@ -34,6 +34,10 @@
  * and emits each chunk to the daemon's own stderr, prefixed with
  * "child stderr: ". Previously stderr_fd was opened by
  * wtd_child_spawn but never read.
+ * Cycle 26: removed the "exit 1s after first ready" timer that was
+ * a testing convenience. The daemon now runs until SIGTERM/SIGINT
+ * flips g_should_exit; tests were already sending SIGTERM at the
+ * end of their scenarios so nothing observable changed for them.
  */
 
 #include "version.h"
@@ -132,7 +136,6 @@ static void stderr_fwd_stop(stderr_fwd_t *f) {
 
 typedef struct {
 	int client_reached_ready;
-	uint64_t ready_at_us;
 	const char *exec_path;
 	wtd_child_t child;
 	int child_spawned;
@@ -277,14 +280,15 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	if (atomic_load(&g_should_exit)) {
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
 	}
-	/* Walk connections; note the first one that reaches ready state
-	 * and exit ~200ms later so pending acks/handshake-done flush out. */
+	/* Walk connections; on the first one that reaches ready state,
+	 * spawn the configured child and attach the peer_session reader
+	 * + stderr forwarder. The daemon keeps running past that — only
+	 * SIGTERM stops the loop (see the should_exit check above). */
 	picoquic_cnx_t *cnx = picoquic_get_first_cnx(quic);
 	while (cnx != NULL) {
 		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
 			if (!ctx->client_reached_ready) {
 				ctx->client_reached_ready = 1;
-				ctx->ready_at_us = picoquic_get_quic_time(quic);
 				printf("client reached ready\n");
 				fflush(stdout);
 				if (ctx->exec_path != NULL && !ctx->child_spawned) {
@@ -323,16 +327,6 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	}
 	drain_outbound(ctx);
 
-	if (ctx->client_reached_ready) {
-		uint64_t now = picoquic_get_quic_time(quic);
-		/* 1s budget post-ready so an inbound stream message has time
-		 * to round-trip through the child and come back on the work
-		 * queue (cycle 22c). The tests drain before waitpid, so a
-		 * generous window doesn't slow them noticeably. */
-		if (now - ctx->ready_at_us > 1000 * 1000) {
-			return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
-		}
-	}
 	return 0;
 }
 
