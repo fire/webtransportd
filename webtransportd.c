@@ -216,6 +216,7 @@ typedef struct wtd_peer {
 	size_t pending_len;   /* bytes queued, not yet written */
 	size_t pending_off;   /* bytes already written */
 	uint64_t dgrams_dropped;
+	void *h3_ctx;  /* h3zero_callback_ctx_t for this connection */
 } wtd_peer_t;
 
 typedef struct {
@@ -393,80 +394,25 @@ static void peer_destroy_all(server_ctx_t *s) {
 /* Cycle 43a: h3zero path_callback for WebTransport on /wt.
  * Signature matches picohttp_post_data_cb_fn. Receives data after HTTP/3
  * header parsing, with stream_ctx providing the stream_id. */
-static int wtd_wt_session_callback(picoquic_cnx_t *cnx,
+/* Default callback — minimal handler until h3zero_callback is set per-connection */
+static int default_callback(picoquic_cnx_t *cnx, uint64_t stream_id,
 		uint8_t *bytes, size_t length,
-		picohttp_call_back_event_t wt_event,
-		struct st_h3zero_stream_ctx_t *stream_ctx,
-		void *path_app_ctx) {
-	server_ctx_t *ctx = (server_ctx_t *)path_app_ctx;
-	if (ctx == NULL || stream_ctx == NULL) {
+		picoquic_call_back_event_t fin_or_event,
+		void *callback_ctx, void *stream_ctx) {
+	(void)cnx;
+	(void)stream_id;
+	(void)bytes;
+	(void)callback_ctx;
+	(void)stream_ctx;
+	if (length == 0 && fin_or_event == picoquic_callback_stream_fin) {
 		return 0;
 	}
-
-	/* Accept CONNECT :protocol=webtransport request to upgrade stream */
-	if (wt_event == picohttp_callback_connect) {
-		/* Cycle 43: Accept WebTransport protocol negotiation */
-		(void)picowt_select_wt_protocol(stream_ctx, "webtransport");
+	if (fin_or_event == picoquic_callback_stream_data) {
 		return 0;
 	}
-	if (wt_event == picohttp_callback_connect_accepted) {
+	if (fin_or_event == picoquic_callback_datagram) {
 		return 0;
 	}
-
-	uint8_t flag;
-	if (wt_event == picohttp_callback_post_data
-			|| wt_event == picohttp_callback_post_fin) {
-		flag = WTD_FRAME_FLAG_RELIABLE;
-	} else if (wt_event == picohttp_callback_post_datagram) {
-		flag = WTD_FRAME_FLAG_UNRELIABLE;
-	} else {
-		/* Ignore other events (free, reset, stop_sending, etc.) */
-		return 0;
-	}
-
-	wtd_peer_t *p = peer_find(ctx, cnx);
-	if (p == NULL) {
-		p = peer_create(ctx, cnx);
-		if (p == NULL) {
-			return 0;
-		}
-	}
-
-	if (flag == WTD_FRAME_FLAG_RELIABLE) {
-		p->active_stream_id = stream_ctx->stream_id;
-		p->stream_seen = 1;
-	}
-
-	if (length == 0 || !p->child_spawned || p->child.stdin_fd < 0) {
-		return 0;
-	}
-
-	uint8_t frame_buf[1 + 4 + 4096];
-	if (length > sizeof(frame_buf) - 1 - 4) {
-		return 0;
-	}
-	size_t out_len = 0;
-	wtd_frame_status_t fs = wtd_frame_encode(flag, bytes, length,
-			frame_buf, sizeof(frame_buf), &out_len);
-	if (fs != WTD_FRAME_OK) {
-		return 0;
-	}
-
-	if (p->pending_len != 0) {
-		if (flag == WTD_FRAME_FLAG_UNRELIABLE) {
-			if (p->dgrams_dropped++ == 0)
-				wtd_log(WTD_LOG_TRACE,
-						"peer %p: first datagram backpressured",
-						(void *)p);
-		} else {
-			wtd_log(WTD_LOG_TRACE, "peer %p: backpressured", (void *)p);
-		}
-		return 0;
-	}
-	memcpy(p->pending_buf, frame_buf, out_len);
-	p->pending_len = out_len;
-	p->pending_off = 0;
-	flush_pending(p);
 	return 0;
 }
 
@@ -495,7 +441,18 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	while (cnx != NULL) {
 		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready
 				&& peer_find(ctx, cnx) == NULL) {
-			(void)peer_create(ctx, cnx);
+			wtd_peer_t *p = peer_create(ctx, cnx);
+			if (p != NULL) {
+				/* Cycle 43: Set up h3zero callback for HTTP/3 + WebTransport.
+				 * h3zero must be registered per-connection via picoquic_set_callback,
+				 * not globally at picoquic_create time. */
+				p->h3_ctx = h3zero_callback_create_context(NULL);
+				if (p->h3_ctx != NULL) {
+					picoquic_set_callback(cnx, h3zero_callback, p->h3_ctx);
+				} else {
+					wtd_log(WTD_LOG_ERROR, "webtransportd: h3zero_callback_create_context failed for cnx %p", (void *)cnx);
+				}
+			}
 			if (!ctx->client_reached_ready) {
 				ctx->client_reached_ready = 1;
 				printf("client reached ready\n");
@@ -555,27 +512,17 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 		}
 	}
 
-	/* Cycle 43a: h3zero setup for HTTP/3 + WebTransport.
-	 * Register /wt path to wtd_wt_session_callback; all other paths
-	 * (or none, if --dir not given) fall through to static file serving. */
-	static picohttp_server_path_item_t path_table[1];
-	path_table[0].path = "/wt";
-	path_table[0].path_length = 3;
-	path_table[0].path_callback = wtd_wt_session_callback;
-	path_table[0].path_app_ctx = &sctx;
-
-	picohttp_server_parameters_t h3_params = { 0 };
-	h3_params.web_folder = sctx.dir_path;
-	h3_params.path_table = path_table;
-	h3_params.path_table_nb = 1;
-
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
+
+	/* h3zero is set up per-connection in packet_loop_cb when each
+	 * connection reaches ready. Register a default callback that does
+	 * nothing; it will be replaced by picoquic_set_callback. */
 	picoquic_quic_t *quic = picoquic_create(
 			8,
 			use_autocert ? NULL : cert,
 			use_autocert ? NULL : key,
 			NULL, "h3",
-			h3zero_callback, &h3_params, NULL, NULL, reset_seed,
+			default_callback, NULL, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
@@ -583,6 +530,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 		free(key_der);
 		return 1;
 	}
+	wtd_log(WTD_LOG_INFO, "webtransportd: picoquic server ready, waiting for connections");
 	/* Cycle 43: Enable WebTransport on the server */
 	picowt_set_default_transport_parameters(quic);
 	if (use_autocert) {
