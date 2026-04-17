@@ -38,6 +38,13 @@
  * a testing convenience. The daemon now runs until SIGTERM/SIGINT
  * flips g_should_exit; tests were already sending SIGTERM at the
  * end of their scenarios so nothing observable changed for them.
+ * Cycle 27: --log-level=<0..4> wires log.c into the daemon.
+ * Cycle 28: every fprintf(stderr, ...) error site and the stderr
+ * forwarder now go through wtd_log. Gives us the mutex protection
+ * against log-line interleaving from the forwarder thread, and
+ * picks up cycle 28's [LEVEL] prefix so a human reading stderr can
+ * pick out [ERROR] lines from the routine [INFO] "child stderr:"
+ * stream.
  */
 
 #include "version.h"
@@ -82,7 +89,7 @@ static int cmd_selftest(void) {
 		8, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		reset_seed, 0, NULL, NULL, NULL, 0);
 	if (quic == NULL) {
-		fprintf(stderr, "webtransportd: picoquic_create failed\n");
+		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
 		return 1;
 	}
 	picoquic_free(quic);
@@ -106,9 +113,17 @@ static void *stderr_fwd_loop(void *arg) {
 	for (;;) {
 		ssize_t n = read(f->fd, buf, sizeof(buf) - 1);
 		if (n > 0) {
+			/* Strip one trailing newline so wtd_log's own "\n" on the
+			 * line terminator doesn't turn every child log line into
+			 * two lines. Any earlier newlines in the chunk stay. */
+			if (buf[n - 1] == '\n') {
+				n--;
+			}
 			buf[n] = '\0';
-			fprintf(stderr, "child stderr: %.*s", (int)n, buf);
-			fflush(stderr);
+			/* wtd_log is mutex-guarded; fprintf from multiple threads
+			 * can interleave. This is the thread-safety payoff for
+			 * cycle 28's refactor. */
+			wtd_log(WTD_LOG_INFO, "child stderr: %s", buf);
 		} else if (n < 0 && errno == EINTR) {
 			continue;
 		} else {
@@ -312,16 +327,16 @@ static int server_loop_cb(picoquic_quic_t *quic,
 						if (rr == 0) {
 							ctx->reader_started = 1;
 						} else {
-							fprintf(stderr,
-									"webtransportd: start_reader rc=%d\n",
+							wtd_log(WTD_LOG_ERROR,
+									"webtransportd: start_reader rc=%d",
 									rr);
 						}
 						/* Cycle 23: start stderr forwarder. */
 						(void)stderr_fwd_start(&ctx->stderr_fwd,
 								ctx->child.stderr_fd);
 					} else {
-						fprintf(stderr,
-								"webtransportd: child_spawn(%s) rc=%d\n",
+						wtd_log(WTD_LOG_ERROR,
+								"webtransportd: child_spawn(%s) rc=%d",
 								ctx->exec_path, rc);
 					}
 				}
@@ -358,7 +373,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 			server_stream_cb, &sctx, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
-		fprintf(stderr, "webtransportd: picoquic_create failed\n");
+		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
 		return 1;
 	}
 	/* Cycle 22e: enable QUIC datagrams. 1500 ≈ ethernet MTU — any
@@ -400,7 +415,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 			|| atomic_load(&g_should_exit)) {
 		return 0;
 	}
-	fprintf(stderr, "webtransportd: packet loop exit rc=%d\n", rc);
+	wtd_log(WTD_LOG_ERROR, "webtransportd: packet loop exit rc=%d", rc);
 	return 1;
 }
 
@@ -453,7 +468,8 @@ int main(int argc, char **argv) {
 		if (parse_arg_value(argv[i], "--log-level=", &log_level_str)) {
 			continue;
 		}
-		fprintf(stderr, "webtransportd: unknown argument: %s\n", argv[i]);
+		wtd_log(WTD_LOG_ERROR,
+				"webtransportd: unknown argument: %s", argv[i]);
 		(void)print_usage(stderr);
 		return 2;
 	}
@@ -461,8 +477,8 @@ int main(int argc, char **argv) {
 	if (log_level_str != NULL) {
 		long level = strtol(log_level_str, NULL, 10);
 		if (level < WTD_LOG_QUIET || level > WTD_LOG_TRACE) {
-			fprintf(stderr,
-					"webtransportd: bad --log-level=%s (expected 0..4)\n",
+			wtd_log(WTD_LOG_ERROR,
+					"webtransportd: bad --log-level=%s (expected 0..4)",
 					log_level_str);
 			return 2;
 		}
@@ -471,13 +487,14 @@ int main(int argc, char **argv) {
 
 	if (is_server) {
 		if (cert == NULL || key == NULL || port_str == NULL) {
-			fprintf(stderr,
-					"webtransportd: --server requires --cert=, --key=, --port=\n");
+			wtd_log(WTD_LOG_ERROR,
+					"webtransportd: --server requires --cert=, --key=, --port=");
 			return 2;
 		}
 		long port = strtol(port_str, NULL, 10);
 		if (port <= 0 || port > 65535) {
-			fprintf(stderr, "webtransportd: bad --port=%s\n", port_str);
+			wtd_log(WTD_LOG_ERROR,
+					"webtransportd: bad --port=%s", port_str);
 			return 2;
 		}
 		return cmd_server(cert, key, (uint16_t)port, exec_path);

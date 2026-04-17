@@ -16,12 +16,12 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | Module          | Cycles | Subject                                                              |
 | --------------- | :----: | -------------------------------------------------------------------- |
 | `frame`         | 1–11, 24–25 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness |
-| `log`           | 12     | Level filter, thread-safe stderr emit                                |
+| `log`           | 12, 28 | Level filter, thread-safe mutex-guarded stderr emit, `[LEVEL]` prefix |
 | `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–27  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level`     |
+| `webtransportd` | 19–28  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level`     |
 
 All work lives in one directory under ASAN+UBSAN. 13 test binaries green:
 
@@ -188,18 +188,38 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   new assertion fires (confirming the flag is what gates the
   output). Default level is `WTD_LOG_INFO`, so operators who
   don't pass `--log-level` see the same output as before.
+- **28** — **`[LEVEL]` log prefix + consistent wtd_log use.**
+  `log.c` now prepends `[ERROR] `, `[WARN] `, `[INFO] `, or
+  `[TRACE] ` to each line it emits, making the daemon's
+  interleaved stderr readable at a glance. Cycle 28 added a
+  cycle28_level_prefix case in `log_test` that exercises all four
+  levels. Separately, every remaining `fprintf(stderr, ...)` call
+  site in the daemon was routed through `wtd_log`: startup errors
+  (`picoquic_create` / `start_reader` / `child_spawn` failures,
+  unknown args, bad flags) emit at `WTD_LOG_ERROR`; the stderr
+  forwarder thread emits forwarded child lines at `WTD_LOG_INFO`.
+  The main observable benefit is thread safety — the forwarder
+  thread's writes are now mutex-guarded and can't interleave
+  mid-line with main-thread writes. Test assertions using
+  `strstr("child stderr: oops", ...)` still match against
+  `[INFO] child stderr: oops`, so nothing downstream broke.
 
 ## Next up
 
-(Nothing queued for the v0.1 scope — streams + datagrams + child
-pipe all round-trip end-to-end. See "After the daemon works" and
-"Future cycles" below.)
+(Nothing queued for v0.1 scope — streams + datagrams + child pipe
+all round-trip end-to-end. Below: follow-up polish and v0.2-ish
+features.)
 
-### Cycle N — Graceful shutdown on real multi-cnx load
+### Cycle 29 — per-cnx peer_session map (multi-client)
 
-21d.3's daemon handles a single connection and self-exits after 200 ms
-of ready state. Production: accept many, handle SIGTERM cleanly with
-every in-flight session drained and every child reaped, no ASAN leaks.
+Today `server_ctx_t` holds a single `active_cnx`, one spawned child,
+one `wtd_peer_session`. Two concurrent clients would overwrite each
+other's state and receive each other's echoes. Next cycle extracts
+`(child, peer_session, active_stream_id)` into a per-cnx `wtd_peer_t`
+keyed by `picoquic_cnx_t*`; the server spawns a child per cnx on
+first stream_data/datagram. A new test launches two clients against
+the same daemon and asserts each sees its own bytes, never the
+other's.
 
 ## Design notes
 

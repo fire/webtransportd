@@ -1,8 +1,14 @@
 /* TDD log:
- * - Cycle 12 (this file): the log module emits a line on stderr when the
- *   message level is <= the configured filter level, and stays silent
- *   otherwise. We capture stderr to a temp file to verify both behaviours
- *   without mocking the FILE*.
+ * - Cycle 12: the log module emits a line on stderr when the message
+ *   level is <= the configured filter level, and stays silent
+ *   otherwise. We capture stderr to a temp file to verify both
+ *   behaviours without mocking the FILE*.
+ *
+ * - Cycle 28: each emitted line is prefixed with its level tag —
+ *   `[ERROR] `, `[WARN] `, `[INFO] `, `[TRACE] `. This lets a human
+ *   reading the daemon's stderr distinguish routine INFO traffic
+ *   (like forwarded child stderr) from genuine daemon errors,
+ *   without having to track which lines came from which code path.
  */
 
 #include "log.h"
@@ -73,7 +79,35 @@ static void cycle12_level_filter(void) {
 	wtd_log_set_level(WTD_LOG_INFO);
 }
 
+static void emit_error_prefixed(void) {
+	wtd_log(WTD_LOG_ERROR, "bad things happened: %d", 7);
+}
+static void emit_trace_prefixed(void) {
+	wtd_log(WTD_LOG_TRACE, "detail level");
+}
+
+static void cycle28_level_prefix(void) {
+	wtd_log_set_level(WTD_LOG_TRACE);
+	char *out = capture_stderr(emit_error_prefixed);
+	EXPECT(out != NULL);
+	EXPECT(strstr(out, "[ERROR] bad things happened: 7") != NULL);
+	free(out);
+
+	out = capture_stderr(emit_trace_prefixed);
+	EXPECT(out != NULL);
+	EXPECT(strstr(out, "[TRACE] detail level") != NULL);
+	free(out);
+
+	out = capture_stderr(emit_info);
+	EXPECT(out != NULL);
+	EXPECT(strstr(out, "[INFO] hello 42") != NULL);
+	free(out);
+
+	wtd_log_set_level(WTD_LOG_INFO);
+}
+
 int main(void) {
 	cycle12_level_filter();
+	cycle28_level_prefix();
 	return failures == 0 ? 0 : 1;
 }
