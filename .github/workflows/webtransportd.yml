@@ -50,7 +50,23 @@ jobs:
       - name: make test
         run: make test CC=${{ matrix.cc }}
 
-      # Daemon startup smoke.
+      # The test build above links ASAN + UBSAN, which makes the
+      # resulting ./webtransportd depend on libclang_rt.asan at
+      # runtime. That dylib isn't installed on end-user machines —
+      # an operator who downloads the artifact just sees a cryptic
+      # dyld "Library not loaded: libclang_rt.asan_osx_dynamic.dylib"
+      # abort. Rebuild the daemon without sanitizers for the
+      # artifact upload so it runs standalone.
+      - name: Rebuild release binary (no sanitizers)
+        env:
+          CFLAGS: "-O2 -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -D_DARWIN_C_SOURCE -fno-omit-frame-pointer -pthread"
+          LDFLAGS: "-pthread"
+          NO_SANITIZER: "1"
+        run: |
+          make clean
+          make webtransportd CC=${{ matrix.cc }}
+
+      # Daemon startup smoke on the release build.
       - name: daemon --version smoke
         run: ./webtransportd --version
 

@@ -17,6 +17,8 @@
 
 #include "child_process.h"
 
+#include "cmdline.h"
+
 #include <errno.h>
 
 #ifdef _WIN32
@@ -34,36 +36,6 @@ static void close_handle(HANDLE *h) {
 		CloseHandle(*h);
 		*h = NULL;
 	}
-}
-
-/* Flatten argv into a single command-line string. Very minimal
- * quoting: each arg that contains a space is wrapped in double
- * quotes. No escaping of embedded quotes — operators passing
- * paths with quotes in them must preprocess argv themselves. */
-static int build_cmdline(const char *const *argv, char *out, size_t cap) {
-	size_t pos = 0;
-	for (int i = 0; argv[i] != NULL; i++) {
-		const char *a = argv[i];
-		size_t len = strlen(a);
-		int needs_quotes = (strchr(a, ' ') != NULL);
-		size_t extra = (i == 0 ? 0 : 1) + (needs_quotes ? 2 : 0) + len;
-		if (pos + extra + 1 > cap) {
-			return -1;
-		}
-		if (i > 0) {
-			out[pos++] = ' ';
-		}
-		if (needs_quotes) {
-			out[pos++] = '"';
-		}
-		memcpy(out + pos, a, len);
-		pos += len;
-		if (needs_quotes) {
-			out[pos++] = '"';
-		}
-	}
-	out[pos] = '\0';
-	return 0;
 }
 
 int wtd_child_spawn(const char *const *argv, const char *const *envp,
@@ -111,7 +83,7 @@ int wtd_child_spawn(const char *const *argv, const char *const *envp,
 	SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
 
 	char cmdline[4096];
-	if (build_cmdline(argv, cmdline, sizeof(cmdline)) != 0) {
+	if (wtd_build_cmdline(argv, cmdline, sizeof(cmdline)) != 0) {
 		close_handle(&in_rd); close_handle(&in_wr);
 		close_handle(&out_rd); close_handle(&out_wr);
 		close_handle(&err_rd); close_handle(&err_wr);

@@ -129,17 +129,28 @@ VENDOR_ISYSTEM := -isystem thirdparty/picotls/picotlsvs/picotls $(VENDOR_ISYSTEM
 endif
 # Sanitizer flags for the vendored TU pile. mingw-w64 doesn't ship
 # libasan so we turn them off on Windows; POSIX keeps them on under
-# the same Makefile contract as our own sources. `-w` silences
-# upstream-only diagnostics so -Werror on our code isn't contaminated
-# by them. `-Wno-error=incompatible-pointer-types` un-promotes gcc
-# 14+'s default-error for cifra's `_BitScanReverse(&uint32_t, ...)`
-# call — `unsigned long *` vs `uint32_t *` are the same size on
-# LLP64 but differently-typed (harmless at the ABI level).
+# the same Makefile contract as our own sources. Set NO_SANITIZER=1
+# (e.g. on the CI release-build step) to drop them everywhere —
+# otherwise the vendored .o files reference ASAN/UBSAN runtime
+# symbols and the link fails when the daemon itself is compiled
+# without the sanitizer (and the resulting binary would depend on
+# libclang_rt.asan_*.dylib, which isn't installed on end-user
+# machines).
+#
+# `-w` silences upstream-only diagnostics so -Werror on our code
+# isn't contaminated by them. `-Wno-error=incompatible-pointer-
+# types` un-promotes gcc 14+'s default-error for cifra's
+# `_BitScanReverse(&uint32_t, ...)` call — `unsigned long *` vs
+# `uint32_t *` are the same size on LLP64 but differently-typed
+# (harmless at the ABI level).
 ifeq ($(OS),Windows_NT)
 VENDOR_SAN :=
 VENDOR_WARN_SUPPRESS := -Wno-error=incompatible-pointer-types \
                         -Wno-error=implicit-function-declaration \
                         -Wno-error=int-conversion
+else ifneq ($(NO_SANITIZER),)
+VENDOR_SAN :=
+VENDOR_WARN_SUPPRESS :=
 else
 VENDOR_SAN := -fsanitize=address,undefined
 VENDOR_WARN_SUPPRESS :=
@@ -278,16 +289,25 @@ thirdparty/picotls/picotlsvs/picotls/%.o: thirdparty/picotls/picotlsvs/picotls/%
 # picoquic.h / picoquic_packet_loop.h.
 webtransportd: webtransportd.c version.h \
                child_process.c child_process.h \
+               cmdline.c cmdline.h \
                peer_session.c peer_session.h \
                frame.c frame.h \
                log.c log.h \
                $(VENDOR_ALL_OBJS) $(WINRES_OBJ)
-	@echo "  CC     $@ (full vendored link + child_process + peer_session + log)"
+	@echo "  CC     $@ (full vendored link + child_process + cmdline + peer_session + log)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ webtransportd.c child_process.c peer_session.c \
+		-o $@ webtransportd.c child_process.c cmdline.c peer_session.c \
 		frame.c log.c \
 		$(VENDOR_ALL_OBJS) $(WINRES_OBJ) \
 		$(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
+
+# Cycle 40b: cmdline_test links cmdline.c standalone. Pure-C helper
+# — no platform includes — so we run the MSDN escaping tests on
+# linux-gcc and macos-clang, which implicitly covers what Windows
+# mingw would see.
+cmdline_test: cmdline_test.c cmdline.c cmdline.h
+	@echo "  CC     $@ (cmdline.c + $<)"
+	$(CC) $(CFLAGS) -o $@ cmdline.c cmdline_test.c $(LDFLAGS)
 
 # Cycle 40a: Windows resource object. windres turns the .rc script
 # (which just points at webtransportd.exe.manifest) into a COFF .o
