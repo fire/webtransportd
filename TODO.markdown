@@ -265,6 +265,15 @@ useful slices, rough order of leverage-per-effort:
    random harness; coverage-guided fuzz catches the rare-prefix
    bug much faster. Needs a `LLVMFuzzerTestOneInput` shim and a
    seed corpus; build with `-fsanitize=fuzzer`.
+7. **Deterministic daemon-launch in tests.** The four tests that
+   fork/exec `./webtransportd` (`handshake_socket_test`,
+   `handshake_echo_test`, `handshake_multi_test`, `selftest_test`)
+   use fixed UDP ports (24443–24445). Occasionally a test fails on
+   the first run after an aborted daemon from a previous run still
+   holds its port, then passes on retry. Options: randomize the
+   port per test, have the daemon accept `--port=0` and print the
+   bound port on stdout, or set `SO_REUSEPORT` on the daemon
+   socket. Shouldn't be hard, and removes the retry flake.
 
 ## Ship prep
 
