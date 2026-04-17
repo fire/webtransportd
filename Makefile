@@ -29,8 +29,18 @@ LDFLAGS ?= -fsanitize=address,undefined -pthread
 WINDRES ?= windres
 ifeq ($(OS),Windows_NT)
 WINRES_OBJ := webtransportd_rc.o
+# Godot's modules/http3/SCsub establishes the proven recipe for this
+# stack on mingw: link ws2_32 (winsock), iphlpapi (GetAdaptersAddresses
+# for picosocks' local-IP enumeration), and bcrypt (Windows CNG RNG
+# used by picotls's Windows path). --allow-multiple-definition papers
+# over a MinGW 14+ header bug where IN6_* helpers are emitted as
+# extern inline in every TU; the linker merges the duplicates.
+WINDOWS_LIBS := -lws2_32 -liphlpapi -lbcrypt
+WINDOWS_LDEXTRA := -Wl,--allow-multiple-definition
 else
 WINRES_OBJ :=
+WINDOWS_LIBS :=
+WINDOWS_LDEXTRA :=
 endif
 
 TESTS_SRC := $(wildcard *_test.c)
@@ -134,6 +144,7 @@ VENDOR_SAN := -fsanitize=address,undefined
 VENDOR_WARN_SUPPRESS :=
 endif
 VENDOR_CFLAGS := -O0 -g -std=c11 -w $(VENDOR_WARN_SUPPRESS) -pthread \
+                 -D_GNU_SOURCE \
                  $(VENDOR_SAN) -fno-omit-frame-pointer \
                  $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS)
 
@@ -163,6 +174,22 @@ PICOTLS_EXCLUDE := \
     thirdparty/picotls/lib/openssl.c
 PICOTLS_SRCS := $(filter-out $(PICOTLS_EXCLUDE), $(wildcard thirdparty/picotls/lib/*.c))
 PICOTLS_OBJS := $(PICOTLS_SRCS:.c=.o)
+
+# picotls.c on Windows calls `wintimeofday` (via wincompat.h's
+# `#define gettimeofday wintimeofday`). Upstream ships wintimeofday.c
+# in the MSVC build subdir but it triggers a `conflicting types`
+# diagnostic under mingw's <time.h> `struct timezone` shape. We
+# provide our own tiny shim in wtd_wincompat.c instead.
+ifeq ($(OS),Windows_NT)
+PICOTLS_OBJS += wtd_wincompat.o
+endif
+
+# Cycle 40-pre2: our own Windows-only gettimeofday shim. POSIX just
+# skips this file — wtd_wincompat.o is only referenced inside
+# `ifeq ($(OS),Windows_NT)` above.
+wtd_wincompat.o: wtd_wincompat.c
+	@echo "  CC     $@ (Windows gettimeofday shim)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
 
 # micro-ecc provides the secp256r1 curve arithmetic that picotls's uecc.c
 # bridges to ptls_minicrypto_secp256r1 / _init_secp256r1sha256_sign_certificate.
@@ -237,6 +264,11 @@ thirdparty/picotls/deps/micro-ecc/%.o: thirdparty/picotls/deps/micro-ecc/%.c
 	@echo "  CC     $@ (vendored, -w)"
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
 
+# Windows-only wintimeofday shim (picotls.c calls it under _WINDOWS).
+thirdparty/picotls/picotlsvs/picotls/%.o: thirdparty/picotls/picotlsvs/picotls/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
 # Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
 # object set for picoquic_create/--selftest; 22a adds child_process.c
 # for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so
@@ -253,7 +285,8 @@ webtransportd: webtransportd.c version.h \
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ webtransportd.c child_process.c peer_session.c \
 		frame.c log.c \
-		$(VENDOR_ALL_OBJS) $(WINRES_OBJ) $(LDFLAGS)
+		$(VENDOR_ALL_OBJS) $(WINRES_OBJ) \
+		$(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 40a: Windows resource object. windres turns the .rc script
 # (which just points at webtransportd.exe.manifest) into a COFF .o
@@ -308,7 +341,7 @@ picoquic_link_test: picoquic_link_test.c $(PICOQUIC_CORE_OBJS)
 picoquic_create_test: picoquic_create_test.c $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (full vendored link)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ picoquic_create_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ picoquic_create_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 21d.2: in-process client+server handshake pumped synchronously.
 # Reads thirdparty/picoquic/certs/{cert,key}.pem at runtime, so `make test`
@@ -316,7 +349,7 @@ picoquic_create_test: picoquic_create_test.c $(VENDOR_ALL_OBJS)
 handshake_test: handshake_test.c $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (full vendored link)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ handshake_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ handshake_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 21d.3: real-socket handshake. Fork/execs ./webtransportd --server
 # on a fixed loopback UDP port and drives a picoquic client against it
@@ -324,7 +357,7 @@ handshake_test: handshake_test.c $(VENDOR_ALL_OBJS)
 handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (loopback UDP handshake)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 22c: end-to-end daemon-internal echo. Client sends bytes on a
 # QUIC stream; daemon frames them into the child's stdin; the reader
@@ -335,7 +368,7 @@ handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $
 handshake_echo_test: handshake_echo_test.c webtransportd examples/echo $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (loopback UDP echo via examples/echo)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 29: two concurrent clients against one daemon. Asserts each
 # sees its own echo, not the other's — exercises the per-cnx
@@ -343,7 +376,7 @@ handshake_echo_test: handshake_echo_test.c webtransportd examples/echo $(VENDOR_
 handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (two concurrent loopback clients)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 40a: the manifest test checks GetACP() inside its own
 # process, so it needs the manifest linked into the test binary

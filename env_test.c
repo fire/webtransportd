@@ -15,6 +15,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* mingw-w64 ships neither POSIX setenv nor unsetenv — it provides
+ * _putenv_s ("NAME", "VALUE") and _putenv("NAME=") (empty-string
+ * value deletes the entry in MSVCRT). Shim both so the test body
+ * below can stay POSIX-flavoured. Not needed in env.c itself —
+ * the module only uses strdup and getenv, both present on mingw. */
+#ifdef _WIN32
+#include <stdlib.h>
+static int setenv(const char *name, const char *value, int overwrite) {
+	(void)overwrite; /* _putenv_s always overwrites; matches overwrite==1 */
+	return _putenv_s(name, value);
+}
+static int unsetenv(const char *name) {
+	size_t n = strlen(name) + 2;
+	char *buf = (char *)malloc(n);
+	if (buf == NULL) {
+		return -1;
+	}
+	snprintf(buf, n, "%s=", name);
+	int rc = _putenv(buf);
+	free(buf);
+	return rc;
+}
+#endif
+
 static int failures = 0;
 #define FAIL(msg) do { fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, msg); failures++; } while (0)
 #define EXPECT(cond) do { if (!(cond)) FAIL(#cond); } while (0)

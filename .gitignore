@@ -16,6 +16,10 @@
 *.o
 *.obj
 
+# Windows cross-build artifacts (mingw .exe, stack dumps)
+*.exe
+*.exe.stackdump
+
 # Editor / OS noise
 .DS_Store
 .vscode/

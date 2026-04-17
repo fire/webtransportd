@@ -90,11 +90,15 @@ jobs:
 
       # Sanitizers are unreliable on mingw-w64; disable them via the
       # same CFLAGS/LDFLAGS knobs our Makefile honors (?= defaults).
-      # The -pthread / -std=c11 parts of the default CFLAGS are still
-      # needed; list them explicitly.
+      # -pthread / -std=c11 / -D_GNU_SOURCE / -D_DARWIN_C_SOURCE need
+      # to match the Makefile's default CFLAGS so feature-test macros
+      # stay consistent with linux-gcc and macos-clang (glibc hides
+      # strdup/setenv/unsetenv/environ without _GNU_SOURCE; Darwin
+      # keeps BSD extensions visible when _POSIX_C_SOURCE-style gating
+      # is active, no-op on mingw).
       - name: make test (no sanitizer)
         env:
-          CFLAGS: "-O0 -g -Wall -Wextra -Werror -std=c11 -fno-omit-frame-pointer -pthread"
+          CFLAGS: "-O0 -g -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -D_DARWIN_C_SOURCE -fno-omit-frame-pointer -pthread"
           LDFLAGS: "-pthread"
         run: make test
 

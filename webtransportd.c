@@ -74,10 +74,13 @@
 /* picoquic.h pulls in <winsock2.h> on Windows (it gates off _WINDOWS)
  * and <sys/socket.h> on POSIX, so AF_INET is available from that
  * include chain on both platforms. The direct sys/socket.h below is
- * redundant on POSIX and broken on mingw — guard it. */
+ * redundant on POSIX and broken on mingw — guard it. unistd.h on
+ * mingw is the canonical home of its read/write wrappers, so we
+ * include it unconditionally (both POSIX and mingw). */
 #ifndef _WIN32
 #include <sys/socket.h>
 #endif
+#include <unistd.h>
 
 static atomic_int g_should_exit = 0;
 
@@ -443,10 +446,19 @@ static int server_loop_cb(picoquic_quic_t *quic,
 
 static int cmd_server(const char *cert, const char *key, uint16_t port,
 		const char *exec_path) {
+	/* POSIX has sigaction (reliable, atomic mask reset); mingw only
+	 * ships `signal()`. We don't need sigaction's advanced features
+	 * for a simple SIGTERM → flag handler, so fall through to the
+	 * basic signal() API on Windows. */
+#ifdef _WIN32
+	signal(SIGTERM, on_sigterm);
+	signal(SIGINT, on_sigterm);
+#else
 	struct sigaction sa = { 0 };
 	sa.sa_handler = on_sigterm;
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
+#endif
 
 	server_ctx_t sctx = { 0 };
 	sctx.exec_path = exec_path;
