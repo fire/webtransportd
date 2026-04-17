@@ -420,6 +420,13 @@ handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
+# Cycle 45: per-peer flow control. Spawns daemon with a slow child
+# (sh -c 'sleep 2; cat') and verifies the pending buffer + O_NONBLOCK
+# write path doesn't stall other peers during the sleep.
+flow_control_test: flow_control_test.c webtransportd $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (non-blocking writes + pending buffer)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ flow_control_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
 # Cycle 40a: the manifest test checks GetACP() inside its own
 # process, so it needs the manifest linked into the test binary

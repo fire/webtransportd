@@ -191,6 +191,9 @@ static void stderr_fwd_stop(stderr_fwd_t *f) {
 	}
 }
 
+/* Cycle 45: per-peer pending buffer for non-blocking writes. */
+#define WTD_PEER_PENDING_CAP (1 + 9 + 4096)
+
 /* Cycle 29: per-cnx state. The daemon holds a linked list of these
  * in server_ctx_t.peers; each cnx the server accepts gets its own
  * spawned child, peer_session, stderr forwarder, and echo target. */
@@ -206,6 +209,11 @@ typedef struct wtd_peer {
 	int peer_initialised;
 	int reader_started;
 	int stream_seen;
+	/* Only the packet-loop thread reads/writes pending_*. */
+	uint8_t pending_buf[WTD_PEER_PENDING_CAP];
+	size_t pending_len;   /* bytes queued, not yet written */
+	size_t pending_off;   /* bytes already written */
+	uint64_t dgrams_dropped;
 } wtd_peer_t;
 
 typedef struct {
@@ -313,6 +321,22 @@ static void drain_all_peers(server_ctx_t *s) {
 	}
 }
 
+/* Cycle 45: attempt to drain pending buffer to child stdin. Called
+ * on each loop tick to make progress on buffered frames that
+ * encountered EAGAIN. */
+static void flush_pending(wtd_peer_t *p) {
+	if (p->pending_len == 0 || p->child.stdin_fd < 0) {
+		return;
+	}
+	int r = write_partial(p->child.stdin_fd, p->pending_buf,
+			p->pending_len, &p->pending_off);
+	if (r == 0 || r < 0) {
+		p->pending_len = 0;
+		p->pending_off = 0;
+	}
+	/* r == 1: partial write, retry next tick */
+}
+
 /* Tear down one peer: terminate child (closes all 3 pipe fds, which
  * wakes the reader + stderr forwarder to EOF), stop the forwarder,
  * drain+destroy the peer_session, free the struct. */
@@ -338,16 +362,19 @@ static void peer_destroy_all(server_ctx_t *s) {
 	s->peers = NULL;
 }
 
-/* Write every byte in buf[0..len) to fd, retrying short writes and
- * EINTR. Returns 0 on success, -errno on hard failure. */
-static int write_all(int fd, const uint8_t *buf, size_t len) {
-	size_t done = 0;
-	while (done < len) {
-		ssize_t n = write(fd, buf + done, len - done);
+/* Cycle 45: non-blocking write helper. Writes as many bytes as
+ * possible without blocking. Returns 0 on full write, 1 on
+ * EAGAIN/partial (*p_done updated), -errno on error. Never blocks. */
+static int write_partial(int fd, const uint8_t *buf, size_t len,
+		size_t *p_done) {
+	while (*p_done < len) {
+		ssize_t n = write(fd, buf + *p_done, len - *p_done);
 		if (n > 0) {
-			done += (size_t)n;
+			*p_done += (size_t)n;
 		} else if (n < 0 && errno == EINTR) {
 			continue;
+		} else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return 1;
 		} else {
 			return -errno;
 		}
@@ -409,7 +436,24 @@ static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 	if (fs != WTD_FRAME_OK) {
 		return 0;
 	}
-	(void)write_all(p->child.stdin_fd, frame_buf, out_len);
+	/* Cycle 45: if pending buffer has unsent data (child stdin is
+	 * full), apply backpressure: drop unreliable datagrams, skip
+	 * reliable stream data (rely on receive window to throttle). */
+	if (p->pending_len != 0) {
+		if (flag == WTD_FRAME_FLAG_UNRELIABLE) {
+			if (p->dgrams_dropped++ == 0)
+				wtd_log(WTD_LOG_TRACE,
+						"peer %p: first datagram backpressured",
+						(void *)p);
+		} else {
+			wtd_log(WTD_LOG_TRACE, "peer %p: backpressured", (void *)p);
+		}
+		return 0;
+	}
+	memcpy(p->pending_buf, frame_buf, out_len);
+	p->pending_len = out_len;
+	p->pending_off = 0;
+	flush_pending(p);
 	return 0;
 }
 
@@ -446,6 +490,13 @@ static int server_loop_cb(picoquic_quic_t *quic,
 			}
 		}
 		cnx = picoquic_get_next_cnx(cnx);
+	}
+	/* Cycle 45: flush pending writes before draining inbound work
+	 * queue. The pending buffer holds frames that encountered EAGAIN
+	 * on the previous tick; we retry them before pulling new inbound
+	 * data. */
+	for (wtd_peer_t *p = ctx->peers; p != NULL; p = p->next) {
+		flush_pending(p);
 	}
 	drain_all_peers(ctx);
 

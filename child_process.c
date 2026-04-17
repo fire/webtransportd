@@ -269,6 +269,13 @@ int wtd_child_spawn(const char *const *argv, const char *const *envp,
 	set_cloexec(in_pipe[1]);
 	set_cloexec(out_pipe[0]);
 	set_cloexec(err_pipe[0]);
+	/* Cycle 45: set non-blocking on parent stdin writer so
+	 * server_stream_cb never blocks waiting for a slow child. */
+	{
+		int _fl = fcntl(in_pipe[1], F_GETFL);
+		if (_fl >= 0)
+			(void)fcntl(in_pipe[1], F_SETFL, _fl | O_NONBLOCK);
+	}
 
 	out->pid = pid;
 	out->stdin_fd = in_pipe[1];
