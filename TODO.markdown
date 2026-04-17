@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–26  | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–27  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level`     |
 
 All work lives in one directory under ASAN+UBSAN. 13 test binaries green:
 
@@ -176,6 +176,18 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   (a daemon that self-terminated was surprising) and lets the
   same build serve multiple concurrent handshakes once the
   per-cnx peer_session split arrives.
+- **27** — **`--log-level=<0..4>` wires log.c into the daemon.**
+  The log module had existed since cycle 12 but the daemon was
+  using `fprintf(stderr, ...)` directly. Now `webtransportd`
+  links `log.c`, parses `--log-level=<n>`, calls
+  `wtd_log_set_level`, and emits a TRACE-level `packet loop ready`
+  sentinel inside the `picoquic_packet_loop_ready` callback.
+  `handshake_socket_test` passes `--log-level=4` and asserts the
+  sentinel appears in the daemon's combined stdout+stderr log.
+  Mutation-tested by dropping the flag from the test's argv — the
+  new assertion fires (confirming the flag is what gates the
+  output). Default level is `WTD_LOG_INFO`, so operators who
+  don't pass `--log-level` see the same output as before.
 
 ## Next up
 

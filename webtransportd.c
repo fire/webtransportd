@@ -44,6 +44,7 @@
 
 #include "child_process.h"
 #include "frame.h"
+#include "log.h"
 #include "peer_session.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
@@ -70,7 +71,8 @@ static int print_usage(FILE *out) {
 	fprintf(out,
 			"usage: webtransportd --version\n"
 			"       webtransportd --selftest\n"
-			"       webtransportd --server --cert=<pem> --key=<pem> --port=<N> [--exec=<bin>]\n");
+			"       webtransportd --server --cert=<pem> --key=<pem> --port=<N>\n"
+			"                    [--exec=<bin>] [--log-level=<0..4>]\n");
 	return 0;
 }
 
@@ -275,6 +277,9 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	if (cb == picoquic_packet_loop_ready) {
 		printf("server ready\n");
 		fflush(stdout);
+		/* Cycle 27: TRACE-level detail only emits when the operator
+		 * asks for it via --log-level=4. */
+		wtd_log(WTD_LOG_TRACE, "packet loop ready");
 		return 0;
 	}
 	if (atomic_load(&g_should_exit)) {
@@ -415,6 +420,7 @@ int main(int argc, char **argv) {
 	const char *key = NULL;
 	const char *port_str = NULL;
 	const char *exec_path = NULL;
+	const char *log_level_str = NULL;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--version") == 0) {
@@ -444,9 +450,23 @@ int main(int argc, char **argv) {
 		if (parse_arg_value(argv[i], "--exec=", &exec_path)) {
 			continue;
 		}
+		if (parse_arg_value(argv[i], "--log-level=", &log_level_str)) {
+			continue;
+		}
 		fprintf(stderr, "webtransportd: unknown argument: %s\n", argv[i]);
 		(void)print_usage(stderr);
 		return 2;
+	}
+
+	if (log_level_str != NULL) {
+		long level = strtol(log_level_str, NULL, 10);
+		if (level < WTD_LOG_QUIET || level > WTD_LOG_TRACE) {
+			fprintf(stderr,
+					"webtransportd: bad --log-level=%s (expected 0..4)\n",
+					log_level_str);
+			return 2;
+		}
+		wtd_log_set_level((wtd_log_level_t)level);
 	}
 
 	if (is_server) {

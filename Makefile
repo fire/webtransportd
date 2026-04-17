@@ -39,17 +39,19 @@ frame_fuzz_test: frame_fuzz_test.c frame.c frame.h
 # Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
 # object set for picoquic_create/--selftest; 22a adds child_process.c
 # for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so
-# the reader thread can decode the child's framed stdout into the
-# outbound work queue. The -isystem keeps -Werror quiet on
+# the reader thread can decode the child's framed stdout; 27 adds
+# log.c for --log-level. The -isystem keeps -Werror quiet on
 # picoquic.h / picoquic_packet_loop.h.
 webtransportd: webtransportd.c version.h \
                child_process.c child_process.h \
                peer_session.c peer_session.h \
                frame.c frame.h \
+               log.c log.h \
                $(VENDOR_ALL_OBJS)
-	@echo "  CC     $@ (full vendored link + child_process + peer_session)"
+	@echo "  CC     $@ (full vendored link + child_process + peer_session + log)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ webtransportd.c child_process.c peer_session.c frame.c \
+		-o $@ webtransportd.c child_process.c peer_session.c \
+		frame.c log.c \
 		$(VENDOR_ALL_OBJS) $(LDFLAGS)
 
 # Cycle 22b: tiny helper child used by handshake_socket_test to prove

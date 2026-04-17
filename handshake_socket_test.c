@@ -18,12 +18,18 @@
  *   wtd_peer_session reader decodes it and the packet-loop callback
  *   prints "outbound frame: flag=0 len=2 payload=hi".
  *
- * - Cycle 23 (this commit): frame_hi also writes "oops\n" to stderr
- *   before the frame. The daemon's stderr forwarder thread reads
- *   the child's stderr_fd and emits "child stderr: oops" on the
- *   daemon's own stderr. This test dup2()s the daemon's stdout and
- *   stderr onto the same pipe so one drain sees both channels, then
- *   asserts the forwarded sentinel in addition to the 22b one.
+ * - Cycle 23: frame_hi also writes "oops\n" to stderr before the
+ *   frame. The daemon's stderr forwarder thread reads child.stderr_fd
+ *   and emits "child stderr: oops" on the daemon's own stderr. The
+ *   test dup2()s the daemon's stdout+stderr onto one pipe so one
+ *   drain sees both channels and asserts the forwarded sentinel.
+ *
+ * - Cycle 27 (this commit): launch the daemon with --log-level=4
+ *   (TRACE) and assert the sentinel "packet loop ready" — a
+ *   TRACE-level wtd_log call in the server's packet_loop_ready
+ *   callback that's filtered out at the default level. This tests
+ *   both the --log-level flag parser and the log.c integration
+ *   into the daemon binary.
  */
 
 #include "picoquic.h"
@@ -112,13 +118,14 @@ static int spawn_daemon(daemon_t *out, uint16_t port, const char *exec_path) {
 		snprintf(port_buf, sizeof(port_buf), "--port=%u", (unsigned)port);
 		snprintf(exec_buf, sizeof(exec_buf), "--exec=%s",
 				exec_path != NULL ? exec_path : "");
-		char *argv[8];
+		char *argv[9];
 		int i = 0;
 		argv[i++] = (char *)"./webtransportd";
 		argv[i++] = (char *)"--server";
 		argv[i++] = (char *)"--cert=thirdparty/picoquic/certs/cert.pem";
 		argv[i++] = (char *)"--key=thirdparty/picoquic/certs/key.pem";
 		argv[i++] = port_buf;
+		argv[i++] = (char *)"--log-level=4"; /* cycle 27: TRACE */
 		if (exec_path != NULL) {
 			argv[i++] = exec_buf;
 		}
@@ -324,6 +331,8 @@ int main(void) {
 	EXPECT(strstr(log, "child spawned pid=") != NULL);
 	EXPECT(strstr(log, "outbound frame: flag=0 len=2 payload=hi") != NULL);
 	EXPECT(strstr(log, "child stderr: oops") != NULL);
+	/* Cycle 27: TRACE log fired because we passed --log-level=4. */
+	EXPECT(strstr(log, "packet loop ready") != NULL);
 
 	int status = 0;
 	kill_and_reap(&d, &status);
