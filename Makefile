@@ -41,29 +41,49 @@ version_test: version_test.c version.h webtransportd
 	@echo "  CC     $@ (smoke: execs ./webtransportd)"
 	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
 
-# Cycle 21a: minimal vendored-picoquic linkage. The include path uses
-# -isystem so our -Werror doesn't trip on picoquic.h; the vendored .c
-# files compile under VENDOR_CFLAGS which keeps sanitizers on but drops
-# -Werror (they are not our source to clean). Wider picoquic build
-# expands on demand in later cycles.
+# Cycles 21a-b: vendored picoquic bring-up. The include paths use
+# -isystem so our -Werror doesn't trip on third-party headers; vendored
+# .c files compile under VENDOR_CFLAGS which keeps sanitizers on but
+# drops -Werror (they are not our source to clean). Include paths cover
+# picoquic's own transitive header needs (picotls for ech.c / tls_api.c
+# and the crypto bridges, mbedtls for the picoquic_mbedtls.c bridge).
 PICOQUIC_ISYSTEM := -isystem thirdparty/picoquic/picoquic
 PICOQUIC_DEFS := \
     -DPICOQUIC_WITH_MBEDTLS=1 \
     -DPTLS_WITHOUT_OPENSSL=1 \
     -DPTLS_WITHOUT_FUSION=1 \
     -DDISABLE_DEBUG_PRINTF=1
+VENDOR_ISYSTEM := \
+    -isystem thirdparty/picoquic/picoquic \
+    -isystem thirdparty/picoquic/picohttp \
+    -isystem thirdparty/picoquic/picoquic_mbedtls \
+    -isystem thirdparty/picotls/include \
+    -isystem thirdparty/mbedtls/include
 VENDOR_CFLAGS := -O0 -g -std=c11 -w -pthread \
                  -fsanitize=address,undefined -fno-omit-frame-pointer \
-                 $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS)
+                 $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS)
 
-error_names.o: thirdparty/picoquic/picoquic/error_names.c
+# Cycle 21b: every file in picoquic/ must compile under VENDOR_CFLAGS.
+# winsockloop.c is Windows-only and drops out on POSIX builds. The
+# generic pattern writes .o next to its .c so `make clean` can blow the
+# whole third-party build away with one glob.
+PICOQUIC_CORE_SRCS := $(filter-out thirdparty/picoquic/picoquic/winsockloop.c, \
+                       $(wildcard thirdparty/picoquic/picoquic/*.c))
+PICOQUIC_CORE_OBJS := $(PICOQUIC_CORE_SRCS:.c=.o)
+
+thirdparty/picoquic/picoquic/%.o: thirdparty/picoquic/picoquic/%.c
 	@echo "  CC     $@ (vendored, -w)"
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
 
-picoquic_link_test: picoquic_link_test.c error_names.o
+# picoquic_link_test forces every PICOQUIC_CORE_OBJS build as a prereq;
+# if any .c in picoquic/ regresses compile, `make test` goes red. The
+# test still only *links* error_names.o (cycle 21a slice); wider link
+# arrives with the picotls/mbedtls slices.
+picoquic_link_test: picoquic_link_test.c $(PICOQUIC_CORE_OBJS)
 	@echo "  CC     $@"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ picoquic_link_test.c error_names.o $(LDFLAGS)
+		-o $@ picoquic_link_test.c \
+		thirdparty/picoquic/picoquic/error_names.o $(LDFLAGS)
 
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
@@ -83,3 +103,4 @@ test: $(TESTS_BIN)
 
 clean:
 	rm -f $(TESTS_BIN) webtransportd *.o
+	rm -f thirdparty/picoquic/picoquic/*.o

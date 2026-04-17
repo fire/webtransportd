@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
 |  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version` (0.1.0-dev); smoke test fork/execs the daemon, checks exit 0, stdout non-empty, contains WTD_VERSION   |     ASAN+UBSAN     |
-|  ✅  | `thirdparty/`   | 21a: minimal picoquic linkage (`error_names.c` compiles under our flags; `picoquic_error_name(INTERNAL_ERROR)` returns `"internal"`)                |     ASAN+UBSAN     |
+|  ✅  | `thirdparty/`   | 21a-b: picoquic builds — every `thirdparty/picoquic/picoquic/*.c` (50 TUs, all except Windows-only `winsockloop.c`) compiles under our flags; `picoquic_link_test` force-builds the whole set | ASAN+UBSAN |
 
 Seven test binaries, all green:
 
@@ -50,14 +50,19 @@ each driven by one failing test:
   `PTLS_WITHOUT_FUSION`, `DISABLE_DEBUG_PRINTF`). Vendored TUs use
   `-w` (sanitizers still on) so their warnings don't stop our
   `-Werror` build.
-- **21b**: compile all of `thirdparty/picoquic/picoquic/*.c` and
-  `thirdparty/picoquic/picohttp/*.c`; RED is a test that calls
-  `picoquic_create(...)` with NULL ticket/token funcs and asserts it
-  returns non-NULL (proves the internal TUs link as a library).
-- **21c**: add `thirdparty/picotls/lib/*.c` +
-  `thirdparty/picoquic/picoquic_mbedtls/*.c` +
-  `thirdparty/mbedtls/library/*.c`. RED: `picoquic_create` with a
-  real mbedtls-backed TLS context initialises without crashing.
+- ✅ **21b (done)**: every `thirdparty/picoquic/picoquic/*.c` (50 TUs,
+  minus Windows-only `winsockloop.c`) compiles under VENDOR_CFLAGS
+  with the wider include path (`picotls/include`, `mbedtls/include`,
+  `picoquic_mbedtls`, `picohttp`). `picoquic_link_test` force-builds
+  the entire object set as a prereq so any compile regression in any
+  picoquic TU turns `make test` red.
+- **21c**: compile `thirdparty/picoquic/picohttp/*.c` +
+  `thirdparty/picotls/lib/*.c` + `thirdparty/picoquic/picoquic_mbedtls/*.c` +
+  `thirdparty/mbedtls/library/*.c` and link them all together. RED:
+  test calls `picoquic_create(8, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, zero_seed, 0, NULL, NULL, NULL, 0)` and asserts the
+  returned context is non-NULL (proves the mbedtls-backed TLS
+  subsystem initialises without crashing).
 - **21d (handshake)**: `handshake_test` drives a picoquic client
   against the daemon and asserts a WebTransport CONNECT reaches
   `picoquic_state_server_ready`.
