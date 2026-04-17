@@ -219,6 +219,7 @@ typedef struct wtd_peer {
 typedef struct {
 	int client_reached_ready;
 	const char *exec_path;
+	const char *dir_path;
 	wtd_peer_t *peers;
 } server_ctx_t;
 
@@ -504,7 +505,7 @@ static int server_loop_cb(picoquic_quic_t *quic,
 }
 
 static int cmd_server(const char *cert, const char *key, uint16_t port,
-		const char *exec_path) {
+		const char *exec_path, const char *dir_path) {
 	/* POSIX has sigaction (reliable, atomic mask reset); mingw only
 	 * ships `signal()`. We don't need sigaction's advanced features
 	 * for a simple SIGTERM → flag handler, so fall through to the
@@ -521,6 +522,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	server_ctx_t sctx = { 0 };
 	sctx.exec_path = exec_path;
+	sctx.dir_path = dir_path;
 
 	/* Cycle 42: --cert=auto generates a self-signed cert + key in
 	 * memory and installs them via picoquic_set_tls_certificate_chain
@@ -639,6 +641,7 @@ int main(int argc, char **argv) {
 	const char *key = NULL;
 	const char *port_str = NULL;
 	const char *exec_path = NULL;
+	const char *dir_path = NULL;
 	const char *log_level_str = NULL;
 
 	for (int i = 1; i < argc; i++) {
@@ -667,6 +670,12 @@ int main(int argc, char **argv) {
 			continue;
 		}
 		if (parse_arg_value(argv[i], "--exec=", &exec_path)) {
+			continue;
+		}
+		if (parse_arg_value(argv[i], "--dir=", &dir_path)) {
+			continue;
+		}
+		if (parse_arg_value(argv[i], "--staticdir=", &dir_path)) {
 			continue;
 		}
 		if (parse_arg_value(argv[i], "--log-level=", &log_level_str)) {
@@ -708,7 +717,7 @@ int main(int argc, char **argv) {
 					"webtransportd: bad --port=%s", port_str);
 			return 2;
 		}
-		return cmd_server(cert, key, (uint16_t)port, exec_path);
+		return cmd_server(cert, key, (uint16_t)port, exec_path, dir_path);
 	}
 
 	(void)print_usage(stderr);
