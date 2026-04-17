@@ -41,16 +41,16 @@ Cycles 43a-43c attempted to integrate h3zero_callback for HTTP/3 support:
 
 ---
 
-## Decision: Keep Raw QUIC for WebTransport
+## Decision: SUPERSEDED — HTTP/3 + picowt_* Required (Cycle 47-48)
 
-The core WebTransport functionality (client → daemon → child → client round-trip) works reliably on raw QUIC:
+~~The core WebTransport functionality (client → daemon → child → client round-trip) works reliably on raw QUIC~~
 
-- `server_stream_cb` + `wtd_frame_encode/decode` tested and stable
-- Multi-client isolation (cycle 29) proven
-- Datagram echo (cycle 22e) working
-- Child process spawning + stderr forwarding (cycles 22a, 23) operational
+**UPDATE (Cycle 47-48)**: Program now requires **"HTTP/3 with WebTransport"** exclusively.
 
-**No pressing reason to switch protocols** now. WebTransport doesn't require HTTP/3; it's a separate protocol upgrade mechanism that picoquic already handles.
+- ❌ Raw QUIC is NO LONGER acceptable (see Design 48)
+- ✓ HTTP/3 + WebTransport MUST coexist
+- ✓ RFC 9220 compliance required
+- ✓ picowt_* APIs are the correct path (not h3zero path callbacks)
 
 ---
 
