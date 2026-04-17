@@ -142,14 +142,15 @@ static void drain_outbound(wtd_peer_t *p) {
 
 		if (frame->flag == 0) {
 			if (p->data_stream_id != UINT64_MAX) {
-				picoquic_add_to_stream(p->cnx, p->data_stream_id,
+				int add_ret = picoquic_add_to_stream(p->cnx,
+						p->data_stream_id,
 						frame->payload, frame->payload_len, 0);
 				wtd_log(WTD_LOG_TRACE,
 						"outbound frame: flag=%d len=%zu "
-						"payload=%.*s",
+						"payload=%.*s (picoquic_add returned %d)",
 						frame->flag, frame->payload_len,
 						(int)frame->payload_len,
-						frame->payload);
+						frame->payload, add_ret);
 			} else {
 				wtd_log(WTD_LOG_WARN,
 						"[Cycle 51] drain_outbound: "
@@ -214,36 +215,52 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 	wtd_peer_t *p = (wtd_peer_t *)path_app_ctx;
 	int ret2 = 0;
 
+	if (p != NULL) {
+		wtd_log(WTD_LOG_TRACE,
+				"[Cycle 51] wt_session_cb: event=%d stream=%" PRIu64
+				" length=%zu control_stream=%" PRIu64,
+				(int)event, stream_ctx->stream_id, length,
+				p->control_stream_id);
+	}
+
 	switch (event) {
 	case picohttp_callback_post_data:
 	case picohttp_callback_post_fin: {
 		if (p == NULL) {
 			break;
 		}
-		if (p->data_stream_id == UINT64_MAX &&
-				stream_ctx->stream_id != p->control_stream_id) {
+		if (stream_ctx->stream_id == p->control_stream_id) {
+			wtd_log(WTD_LOG_TRACE,
+					"[Cycle 51] post_data on control stream "
+					"(capsule), skipping");
+			break;
+		}
+		if (p->data_stream_id == UINT64_MAX) {
 			p->data_stream_id = stream_ctx->stream_id;
 			wtd_log(WTD_LOG_TRACE,
 					"[Cycle 51] data_stream_id set to %" PRIu64,
 					p->data_stream_id);
 		}
-		if (stream_ctx->stream_id != p->control_stream_id && length > 0) {
-			uint8_t frame_buf[4096];
-			size_t frame_len = 0;
-			ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
-					sizeof(frame_buf), &frame_len);
-			if (ret2 == 0) {
-				ssize_t nwritten = write(p->child.stdin_fd,
-						frame_buf, frame_len);
-				wtd_log(WTD_LOG_TRACE,
-						"[Cycle 51] wrote %zu bytes to "
-						"child stdin (ret=%zd)",
-						frame_len, nwritten);
-			} else {
-				wtd_log(WTD_LOG_ERROR,
-						"[Cycle 51] wtd_frame_encode "
-						"failed: %d", ret2);
-			}
+		if (length == 0) {
+			wtd_log(WTD_LOG_TRACE,
+					"[Cycle 51] post_data: length==0, skipping");
+			break;
+		}
+		uint8_t frame_buf[4096];
+		size_t frame_len = 0;
+		ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
+				sizeof(frame_buf), &frame_len);
+		if (ret2 == 0) {
+			ssize_t nwritten = write(p->child.stdin_fd,
+					frame_buf, frame_len);
+			wtd_log(WTD_LOG_TRACE,
+					"[Cycle 51] wrote %zu bytes to "
+					"child stdin (ret=%zd)",
+					frame_len, nwritten);
+		} else {
+			wtd_log(WTD_LOG_ERROR,
+					"[Cycle 51] wtd_frame_encode "
+					"failed: %d", ret2);
 		}
 		break;
 	}

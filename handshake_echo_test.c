@@ -228,6 +228,11 @@ static int wt_client_cb(picoquic_cnx_t *cnx, uint8_t *bytes,
 	client_ctx_t *c = (client_ctx_t *)path_app_ctx;
 	(void)stream_ctx;
 
+	fprintf(stderr, "[CLIENT] wt_client_cb: event=%d stream=%" PRIu64
+			" length=%zu\n",
+			(int)fin_or_event, stream_ctx ? stream_ctx->stream_id : UINT64_MAX,
+			length);
+
 	switch (fin_or_event) {
 	case picohttp_callback_connecting:
 		c->control_stream_id = 0;
@@ -236,15 +241,14 @@ static int wt_client_cb(picoquic_cnx_t *cnx, uint8_t *bytes,
 	case picohttp_callback_connect_accepted: {
 		c->connect_accepted = 1;
 
-		if (picowt_create_local_stream(cnx, 1, c->h3_ctx,
-				c->control_stream_id) != 0) {
-			return -1;
-		}
-
-		h3zero_stream_ctx_t *data_stream = h3zero_find_stream(c->h3_ctx,
-				stream_ctx->stream_id + 2);
+		h3zero_stream_ctx_t *data_stream = picowt_create_local_stream(cnx, 1,
+				c->h3_ctx, c->control_stream_id);
 		if (data_stream != NULL) {
-			picoquic_add_to_stream(cnx, data_stream->stream_id,
+			uint64_t data_stream_id = data_stream->stream_id;
+			data_stream->ps.stream_state.is_web_transport = 1;
+			data_stream->path_callback = wt_client_cb;
+			data_stream->path_callback_ctx = c;
+			picoquic_add_to_stream(cnx, data_stream_id,
 					(const uint8_t *)PAYLOAD,
 					sizeof(PAYLOAD) - 1, 0);
 		}
