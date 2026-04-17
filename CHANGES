@@ -89,3 +89,33 @@ Ship prep (cycles 31–34)
 * 34 — examples/frame-helper.sh for shell-level framing. One
   (flag, payload) -> framed envelope on stdout, python3 handles
   the varint widths.
+
+Portability and CI (cycles 35–39)
+---------------------------------
+
+* 35 — AUTHORS and CHANGES files land as first-party docs.
+* 36 — GitHub Actions CI matrix: linux-gcc (ubuntu-latest),
+  macos-clang (macos-latest), windows-mingw (MSYS2 + mingw-w64).
+  POSIX jobs run `make test` under ASAN+UBSAN; the Windows job
+  overrides CFLAGS/LDFLAGS to disable sanitizers (mingw's ASAN is
+  unreliable). All three smoke --version and upload the binary.
+* 37 — Win32 branch in child_process.c: CreatePipe ×3 with
+  SetHandleInformation on the parent-side ends, CreateProcessA
+  with STARTF_USESTDHANDLES, and _open_osfhandle to wrap pipe
+  HANDLEs as CRT file descriptors so the daemon's existing
+  read/write/close calls work unchanged. WTD_CHILD_PID_NONE hides
+  the pid_t vs HANDLE switch from callers.
+* 38 — Makefile ordering fix. The webtransportd: target listed
+  $(VENDOR_ALL_OBJS) as a prerequisite but the variable was
+  defined ~130 lines later; GNU make expands prerequisite lists
+  at parse time, so the expansion silently yielded the empty
+  string and no vendored .o files were scheduled to build. Local
+  macOS worked because prior builds left .o files in the tree;
+  CI starts clean and link bombed across all three jobs. Moved
+  the vendor blocks above the rule.
+* 39 — Linux and Windows platform fixes exposed once cycle 38
+  unblocked the CI build. Added -D_GNU_SOURCE -D_DARWIN_C_SOURCE
+  to CFLAGS so glibc exposes strdup/setenv/unsetenv/environ under
+  -std=c11 (macOS headers hid the bug locally). Wrapped the
+  POSIX-only helpers in child_process_test.c in #ifndef _WIN32
+  so pid-as-HANDLE doesn't break the compile under mingw.
