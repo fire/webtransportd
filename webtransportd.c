@@ -83,6 +83,14 @@ static int server_loop_cb(picoquic_quic_t *quic,
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
 	}
 
+	/* TODO (Cycle 50): integrate server-side WT stream handling
+	 * - register server-side WT callback via picowt APIs
+	 * - spawn child process on CONNECT
+	 * - route stream/datagram data to/from child stdin/stdout
+	 * - drain outbound frames back to client */
+	wtd_log(WTD_LOG_TRACE,
+			"[UNIMPLEMENTED] server-side WebTransport stream routing not yet integrated");
+
 	return 0;
 }
 
@@ -138,6 +146,15 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	}
 
 	wtd_log(WTD_LOG_INFO, "webtransportd: HTTP/3 server on port %u", port);
+
+	/* TODO (Cycle 50): server-side WebTransport integration
+	 * - implement server-side WT callback (stream/datagram handlers)
+	 * - restore peer_create/peer_remove for connection lifecycle
+	 * - integrate picowt stream prefix registration on CONNECT
+	 * see: thirdparty/picoquic/picohttp/wt_baton.c for reference pattern */
+	wtd_log(WTD_LOG_WARN,
+			"[PLACEHOLDER] server-side WebTransport not yet implemented; "
+			"CONNECT requests will timeout");
 
 	picowt_set_default_transport_parameters(quic);
 	(void)picoquic_set_default_tp_value(quic,
