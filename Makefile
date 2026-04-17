@@ -93,6 +93,7 @@ PICOQUIC_DEFS := \
     -DPICOQUIC_WITH_MBEDTLS=1 \
     -DPTLS_WITHOUT_OPENSSL=1 \
     -DPTLS_WITHOUT_FUSION=1 \
+    -DPICOQUIC_WITHOUT_SSLKEYLOG=1 \
     -DDISABLE_DEBUG_PRINTF=1
 
 # picoquic's headers gate the Win32 socket include block on
