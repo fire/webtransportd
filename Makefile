@@ -428,6 +428,14 @@ flow_control_test: flow_control_test.c webtransportd $(VENDOR_ALL_OBJS)
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ flow_control_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
 
+# Cycle 43: --dir=<path> static file serving. Daemon serves static files
+# on non-/wt HTTP/3 paths alongside the WebTransport endpoint. This test
+# verifies --dir= flag is parsed and static file GET requests work.
+handshake_static_test: handshake_static_test.c webtransportd examples/echo $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (static file serving via --dir=)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_static_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
+
 # Cycle 40a: the manifest test checks GetACP() inside its own
 # process, so it needs the manifest linked into the test binary
 # too — not just into webtransportd.exe. The .rc dependency is
