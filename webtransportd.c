@@ -394,28 +394,6 @@ static void peer_destroy_all(server_ctx_t *s) {
 /* Cycle 43a: h3zero path_callback for WebTransport on /wt.
  * Signature matches picohttp_post_data_cb_fn. Receives data after HTTP/3
  * header parsing, with stream_ctx providing the stream_id. */
-/* Default callback — minimal handler until h3zero_callback is set per-connection */
-static int default_callback(picoquic_cnx_t *cnx, uint64_t stream_id,
-		uint8_t *bytes, size_t length,
-		picoquic_call_back_event_t fin_or_event,
-		void *callback_ctx, void *stream_ctx) {
-	(void)cnx;
-	(void)stream_id;
-	(void)bytes;
-	(void)callback_ctx;
-	(void)stream_ctx;
-	if (length == 0 && fin_or_event == picoquic_callback_stream_fin) {
-		return 0;
-	}
-	if (fin_or_event == picoquic_callback_stream_data) {
-		return 0;
-	}
-	if (fin_or_event == picoquic_callback_datagram) {
-		return 0;
-	}
-	return 0;
-}
-
 static int server_loop_cb(picoquic_quic_t *quic,
 		picoquic_packet_loop_cb_enum cb,
 		void *cb_ctx, void *cb_arg) {
@@ -438,21 +416,18 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	 * first sighting). The daemon keeps running past the first ready
 	 * — only SIGTERM stops the loop. */
 	picoquic_cnx_t *cnx = picoquic_get_first_cnx(quic);
+	if (cnx == NULL) {
+		wtd_log(WTD_LOG_TRACE, "no connections yet");
+	}
 	while (cnx != NULL) {
-		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready
+		picoquic_state_enum state = picoquic_get_cnx_state(cnx);
+		if (state != picoquic_state_ready) {
+			wtd_log(WTD_LOG_TRACE, "connection in state %d (waiting for ready=%d)",
+					state, picoquic_state_ready);
+		}
+		if (state == picoquic_state_ready
 				&& peer_find(ctx, cnx) == NULL) {
-			wtd_peer_t *p = peer_create(ctx, cnx);
-			if (p != NULL) {
-				/* Cycle 43: Set up h3zero callback for HTTP/3 + WebTransport.
-				 * h3zero must be registered per-connection via picoquic_set_callback,
-				 * not globally at picoquic_create time. */
-				p->h3_ctx = h3zero_callback_create_context(NULL);
-				if (p->h3_ctx != NULL) {
-					picoquic_set_callback(cnx, h3zero_callback, p->h3_ctx);
-				} else {
-					wtd_log(WTD_LOG_ERROR, "webtransportd: h3zero_callback_create_context failed for cnx %p", (void *)cnx);
-				}
-			}
+			(void)peer_create(ctx, cnx);
 			if (!ctx->client_reached_ready) {
 				ctx->client_reached_ready = 1;
 				printf("client reached ready\n");
@@ -514,15 +489,27 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 
-	/* h3zero is set up per-connection in packet_loop_cb when each
-	 * connection reaches ready. Register a default callback that does
-	 * nothing; it will be replaced by picoquic_set_callback. */
+	/* Create h3zero parameters for path routing and static file serving.
+	 * Register h3zero_callback directly at picoquic_create time so that
+	 * CONNECT requests (which arrive before connection ready state) are
+	 * properly handled by HTTP/3 layer. */
+	static picohttp_server_path_item_t path_table[1];
+	path_table[0].path = "/wt";
+	path_table[0].path_length = 3;
+	path_table[0].path_callback = NULL;  /* h3zero handles WebTransport internally */
+	path_table[0].path_app_ctx = NULL;
+
+	picohttp_server_parameters_t h3_params = { 0 };
+	h3_params.web_folder = sctx.dir_path;
+	h3_params.path_table = path_table;
+	h3_params.path_table_nb = 1;
+
 	picoquic_quic_t *quic = picoquic_create(
 			8,
 			use_autocert ? NULL : cert,
 			use_autocert ? NULL : key,
 			NULL, "h3",
-			default_callback, NULL, NULL, NULL, reset_seed,
+			h3zero_callback, &h3_params, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		wtd_log(WTD_LOG_ERROR, "webtransportd: picoquic_create failed");
