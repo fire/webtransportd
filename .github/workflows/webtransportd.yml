@@ -1,0 +1,110 @@
+# Cycle 36: CI across linux-gcc, macos-clang, and windows-mingw.
+#
+# All three jobs install only the stock toolchain — no external TLS
+# package — because mbedtls + picoquic + picotls are all vendored
+# under thirdparty/. On Linux and macOS `make test` runs every
+# *_test.c under ASAN + UBSAN (our Makefile contract), then a
+# --version smoke on the daemon binary, then upload.
+#
+# Windows runs via MSYS2 + mingw-w64. Sanitizers aren't reliable on
+# that toolchain and some POSIX bits child_process.c depends on
+# (fork, execvp) are emulated rather than native, so the Windows
+# job disables sanitizers via CFLAGS/LDFLAGS overrides. The native
+# Win32 `child_process_win.c` from the Wanted list would replace
+# that emulation with a CreateProcess-based implementation.
+
+name: webtransportd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  posix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,   os: ubuntu-latest, cc: gcc }
+          - { name: macos-clang, os: macos-latest,  cc: clang }
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          ${{ matrix.cc }} --version
+          make --version
+
+      # make test: compiles every module + vendored TU, runs every
+      # test binary under -fsanitize=address,undefined with -Werror
+      # on our first-party code. Vendored TUs keep -w so upstream
+      # warnings don't fight the build.
+      - name: make test
+        run: make test CC=${{ matrix.cc }}
+
+      # Daemon startup smoke.
+      - name: daemon --version smoke
+        run: ./webtransportd --version
+
+      - name: Upload webtransportd binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtransportd-${{ matrix.name }}
+          path: webtransportd
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: windows-mingw
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 + mingw-w64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            make
+
+      - name: Show toolchain
+        run: |
+          gcc --version
+          make --version
+
+      # Sanitizers are unreliable on mingw-w64; disable them via the
+      # same CFLAGS/LDFLAGS knobs our Makefile honors (?= defaults).
+      # The -pthread / -std=c11 parts of the default CFLAGS are still
+      # needed; list them explicitly.
+      - name: make test (no sanitizer)
+        env:
+          CFLAGS: "-O0 -g -Wall -Wextra -Werror -std=c11 -fno-omit-frame-pointer -pthread"
+          LDFLAGS: "-pthread"
+        run: make test
+
+      - name: daemon --version smoke
+        run: ./webtransportd.exe --version
+
+      - name: Upload webtransportd binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtransportd-windows-mingw
+          path: webtransportd.exe
+          if-no-files-found: error
+          retention-days: 14

@@ -277,12 +277,13 @@ useful slices, rough order of leverage-per-effort:
 
 ## Ship prep
 
-- **CI**: `.github/workflows/webtransportd.yml` — three-job matrix
-  (`linux-gcc`, `macos-clang`, `windows-clang-cl`),
-  `actions/checkout@v4`, compiler toolchain only (no TLS package
-  dependency), `make test` + `./webtransportd --version` smoke,
-  upload the binary via `actions/upload-artifact@v4`. Treat
-  warnings as errors (`-Werror` / `/WX`).
+- **CI**: ✅ `.github/workflows/webtransportd.yml` shipped in
+  cycle 36. Three jobs: `linux-gcc`, `macos-clang`,
+  `windows-mingw` (MSYS2 + mingw-w64). POSIX jobs run `make test`
+  under ASAN+UBSAN; Windows disables sanitizers via CFLAGS/LDFLAGS
+  env overrides because mingw's ASAN is unreliable. All three
+  smoke `--version` and upload the binary. `windows-clang-cl`
+  stays wanted for when a native `child_process_win.c` lands.
 - **Makefile.win** + **sources.mk** so POSIX `make` and Windows
   `nmake` share one source list.
 - **Docs**: top-level `README.md` (usage, framing spec, CLI flags,
