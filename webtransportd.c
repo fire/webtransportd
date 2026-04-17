@@ -12,7 +12,10 @@
 #include "version.h"
 
 #include "autocert.h"
+#include "child_process.h"
+#include "frame.h"
 #include "log.h"
+#include "peer_session.h"
 #include "picotls.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
@@ -34,24 +37,79 @@
 
 static atomic_int g_should_exit = 0;
 
+typedef struct wtd_peer {
+	picoquic_cnx_t *cnx;
+	wtd_child_t child;
+	wtd_peer_session_t session;
+	struct wtd_peer *next;
+} wtd_peer_t;
+
+typedef struct {
+	const char *exec_path;
+	const char *dir_path;
+	wtd_peer_t *peers;
+} server_ctx_t;
+
 static void on_sigterm(int sig) {
 	(void)sig;
 	atomic_store(&g_should_exit, 1);
 }
 
-typedef struct {
-	const char *exec_path;
-	const char *dir_path;
-} server_ctx_t;
+static wtd_peer_t *peer_find(server_ctx_t *s, picoquic_cnx_t *cnx) {
+	for (wtd_peer_t *p = s->peers; p != NULL; p = p->next) {
+		if (p->cnx == cnx) {
+			return p;
+		}
+	}
+	return NULL;
+}
 
+static wtd_peer_t *peer_create(server_ctx_t *s, picoquic_cnx_t *cnx) {
+	wtd_peer_t *p = (wtd_peer_t *)calloc(1, sizeof(*p));
+	if (p == NULL) {
+		return NULL;
+	}
+	p->cnx = cnx;
+	p->next = s->peers;
+	s->peers = p;
+
+	if (s->exec_path != NULL) {
+		const char *const argv[] = { s->exec_path, NULL };
+		if (wtd_child_spawn(argv, NULL, &p->child) != 0) {
+			s->peers = p->next;
+			free(p);
+			return NULL;
+		}
+		wtd_peer_session_init(&p->session);
+		if (wtd_peer_session_start_reader(&p->session, p->child.stdout_fd,
+				NULL, NULL) != 0) {
+			wtd_child_terminate(&p->child);
+			s->peers = p->next;
+			free(p);
+			return NULL;
+		}
+	}
+	return p;
+}
+
+static void drain_outbound(wtd_peer_t *p, picoquic_cnx_t *cnx) {
+	(void)cnx;
+	wtd_outbound_frame_t *frame;
+	while ((frame = wtd_work_queue_drain(&p->session.outbound)) != NULL) {
+		wtd_log(WTD_LOG_TRACE,
+				"outbound frame: flag=%d len=%zu payload=%.*s",
+				frame->flag, frame->payload_len,
+				(int)frame->payload_len, frame->payload);
+		free(frame);
+	}
+}
 
 /* Packet loop callback */
 static int server_loop_cb(picoquic_quic_t *quic,
 		picoquic_packet_loop_cb_enum cb,
 		void *cb_ctx, void *cb_arg) {
 	(void)cb_arg;
-	(void)cb_ctx;
-	(void)quic;
+	server_ctx_t *ctx = (server_ctx_t *)cb_ctx;
 
 	if (cb == picoquic_packet_loop_ready) {
 		printf("server ready\n");
@@ -62,6 +120,18 @@ static int server_loop_cb(picoquic_quic_t *quic,
 
 	if (atomic_load(&g_should_exit)) {
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
+	}
+
+	picoquic_cnx_t *cnx = picoquic_get_first_cnx(quic);
+	while (cnx != NULL) {
+		wtd_peer_t *p = peer_find(ctx, cnx);
+		if (p == NULL && picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
+			p = peer_create(ctx, cnx);
+		}
+		if (p != NULL) {
+			drain_outbound(p, cnx);
+		}
+		cnx = picoquic_get_next_cnx(cnx);
 	}
 
 	return 0;
@@ -79,7 +149,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	sigaction(SIGINT, &sa, NULL);
 #endif
 
-	server_ctx_t sctx = { exec_path, dir_path };
+	server_ctx_t sctx = { exec_path, dir_path, NULL };
 
 	int use_autocert = (cert != NULL && strcmp(cert, "auto") == 0);
 	uint8_t *cert_der = NULL;
@@ -172,6 +242,15 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
+
+	wtd_peer_t *p = sctx.peers;
+	while (p != NULL) {
+		wtd_peer_t *next = p->next;
+		wtd_peer_session_destroy(&p->session);
+		wtd_child_terminate(&p->child);
+		free(p);
+		p = next;
+	}
 
 	picoquic_free(quic);
 	h3zero_callback_delete_context(NULL, h3_ctx);
