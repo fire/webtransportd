@@ -66,14 +66,37 @@ down, and each one unlocks a distinct capability.
 
 ### Frontier
 
-1. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
+1. **Windows UTF-8 parity.** *Effort: medium. Value: required.*
+   Windows is a first-class target, not best-effort — UTF-8 paths,
+   argv, env, and child-stdin/stdout must round-trip identically to
+   POSIX. Concrete pieces:
+   - Embed an application manifest with
+     `<activeCodePage>UTF-8</activeCodePage>` so the CRT's `main`
+     argv, `getenv`, and `fopen` all treat bytes as UTF-8 (Windows
+     10 1903+). On mingw, ship via `windres` + an `.rc` file; on
+     `clang-cl` via the `/MANIFEST:EMBED` link flag.
+   - Verify `CreateProcessA` in `child_process.c` now sees UTF-8
+     correctly (with the manifest active it does). If an older
+     Windows target ever becomes a requirement, switch to
+     `CreateProcessW` with a built UTF-16 command line — but
+     don't do that work speculatively.
+   - `build_cmdline()` still doesn't escape embedded quotes; add
+     the MSDN "Parsing C++ Command-Line Arguments" escape rules
+     (backslash runs before quotes, quote-inside-quote doubling).
+   - New `handshake_utf8_test` (or extend `handshake_echo_test`)
+     exec's the child through a path containing `文档`/`日本語`
+     and sends a UTF-8 payload; asserts round-trip byte equality
+     both ways.
+   - `--version` / `--help` output should also round-trip UTF-8
+     sentinel bytes without mojibake on Windows.
+2. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
    *Effort: low. Value: low–medium.* Cycle 25 already added the
    decode side — mirror it on the encoder and bump the max above
    `2^30` so large reliable payloads don't force a session close.
    Smallest behavioural test: encode a `2^30`-byte payload via a
    synthetic wrapper (no 1 GB buffer needed). On the frontier
    because nothing else comes close to this little effort.
-2. **`--cert=auto`.** *Effort: medium. Value: high.* Generate a
+3. **`--cert=auto`.** *Effort: medium. Value: high.* Generate a
    self-signed cert+key in-memory via mbedtls so the daemon boots
    without a PEM pair on disk — the single biggest UX win for
    first-time operators. Uses `mbedtls_x509write_crt_*` +
@@ -81,18 +104,18 @@ down, and each one unlocks a distinct capability.
    `picoquic_set_tls_certificate_chain` / `picoquic_set_tls_key`
    pair. Opens the door to `--cert=auto` **persistence** as a
    follow-up (survives restart).
-3. **`--dir=<path>` / `--staticdir=<path>`.** *Effort: medium.
+4. **`--dir=<path>` / `--staticdir=<path>`.** *Effort: medium.
    Value: high.* Serve static files on non-WT request paths,
    mirroring websocketd's `http.go`. Unlocks the devconsole story
    (ship a browser client alongside the daemon in one process).
    Independent hot path from `--cert=auto`, so the two don't trade
    off against each other.
-4. **`README.md`.** *Effort: medium. Value: high.* Usage,
+5. **`README.md`.** *Effort: medium. Value: high.* Usage,
    framing spec, CLI flags, relationship to Godot, quickstart.
    The single biggest adoption lever once `--cert=auto` lands.
    (The harness rule deliberately blocks this from going first —
    write docs against the real behaviour, not plans.)
-5. **Per-peer flow control.** *Effort: high. Value: high.* When a
+6. **Per-peer flow control.** *Effort: high. Value: high.* When a
    child's stdin pipe fills, the current `write_all` blocks the
    packet loop thread. Detect partial writes, stash the remaining
    frame on the peer, and apply WT stream-level backpressure
@@ -124,9 +147,6 @@ in without a reason:
   MSYS2 already proves Windows builds in CI (cycle 36). A dedicated
   nmake path would duplicate the source list without enabling a new
   toolchain we can't already use.
-- **`CreateProcessW` with UTF-16 command line.** Only meaningful
-  for non-ASCII executable paths, which no current operator has
-  asked for. Revisit when someone files a bug.
 - **Native `windows-clang-cl` / MSVC build.** MSYS2 + mingw-w64
   already ships a working Windows binary from CI (cycle 36); a
   second Windows toolchain costs matrix time without enabling
