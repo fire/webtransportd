@@ -21,9 +21,9 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
 |  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version` (0.1.0-dev); smoke test fork/execs the daemon, checks exit 0, stdout non-empty, contains WTD_VERSION   |     ASAN+UBSAN     |
-|  ✅  | `thirdparty/`   | 21a-b: picoquic builds — every `thirdparty/picoquic/picoquic/*.c` (50 TUs, all except Windows-only `winsockloop.c`) compiles under our flags; `picoquic_link_test` force-builds the whole set | ASAN+UBSAN |
+|  ✅  | `thirdparty/`   | 21a-c: full vendored build — picoquic (50) + picohttp (13) + picotls/lib (9) + cifra adapters (5) + cifra internals (24) + micro-ecc (1) + picoquic_mbedtls (2) + mbedtls/library (103) + loglib (10) all compile + link; `picoquic_create(...)` returns non-NULL under mbedtls-backed TLS | ASAN+UBSAN |
 
-Seven test binaries, all green:
+Eight test binaries, all green:
 
 ```
 $ make test
@@ -32,6 +32,7 @@ $ make test
   RUN    ./frame_test
   RUN    ./log_test
   RUN    ./peer_session_test
+  RUN    ./picoquic_create_test
   RUN    ./picoquic_link_test
   RUN    ./version_test
   OK     all tests passed
@@ -56,13 +57,16 @@ each driven by one failing test:
   `picoquic_mbedtls`, `picohttp`). `picoquic_link_test` force-builds
   the entire object set as a prereq so any compile regression in any
   picoquic TU turns `make test` red.
-- **21c**: compile `thirdparty/picoquic/picohttp/*.c` +
-  `thirdparty/picotls/lib/*.c` + `thirdparty/picoquic/picoquic_mbedtls/*.c` +
-  `thirdparty/mbedtls/library/*.c` and link them all together. RED:
-  test calls `picoquic_create(8, NULL, NULL, NULL, NULL, NULL, NULL,
-  NULL, NULL, zero_seed, 0, NULL, NULL, NULL, 0)` and asserts the
-  returned context is non-NULL (proves the mbedtls-backed TLS
-  subsystem initialises without crashing).
+- ✅ **21c (done)**: full vendored build + link. picohttp, picotls/lib
+  (minus certificate_compression/fusion/mbedtls/mbedtls_sign/openssl),
+  picotls/lib/cifra (minus libaegis — needs external `<aegis.h>`),
+  cifra internals (minus test drivers + curve25519.donna/.naclref;
+  curve25519.c wraps tweetnacl inline), micro-ecc, picoquic_mbedtls,
+  mbedtls/library (minus godot_core_mbedtls_platform's legacy
+  config.h layout), and loglib all compile + link. `picoquic_create_test`
+  calls `picoquic_create(8, NULL-cert, NULL-key, ..., zero_reset_seed,
+  ...)` — asserts non-NULL return, then `picoquic_free` tears it down
+  under ASAN+UBSAN without leaks.
 - **21d (handshake)**: `handshake_test` drives a picoquic client
   against the daemon and asserts a WebTransport CONNECT reaches
   `picoquic_state_server_ready`.

@@ -57,7 +57,11 @@ VENDOR_ISYSTEM := \
     -isystem thirdparty/picoquic/picoquic \
     -isystem thirdparty/picoquic/picohttp \
     -isystem thirdparty/picoquic/picoquic_mbedtls \
+    -isystem thirdparty/picoquic/loglib \
     -isystem thirdparty/picotls/include \
+    -isystem thirdparty/picotls/deps/cifra/src \
+    -isystem thirdparty/picotls/deps/cifra/src/ext \
+    -isystem thirdparty/picotls/deps/micro-ecc \
     -isystem thirdparty/mbedtls/include
 VENDOR_CFLAGS := -O0 -g -std=c11 -w -pthread \
                  -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -71,19 +75,113 @@ PICOQUIC_CORE_SRCS := $(filter-out thirdparty/picoquic/picoquic/winsockloop.c, \
                        $(wildcard thirdparty/picoquic/picoquic/*.c))
 PICOQUIC_CORE_OBJS := $(PICOQUIC_CORE_SRCS:.c=.o)
 
+# Cycle 21c: picohttp + picotls (minus 5 files not compiled under our
+# flags: brotli-backed certificate_compression, x86-only fusion, the
+# broken upstream mbedtls_sign superseded by picoquic_mbedtls's copy,
+# the openssl-dependent openssl.c, and the sha2-dependent uecc) +
+# picoquic_mbedtls + mbedtls/library (minus Godot's platform shim for
+# the legacy mbedtls config.h layout). Together these supply the TLS
+# symbols picoquic_create needs.
+PICOHTTP_SRCS := $(wildcard thirdparty/picoquic/picohttp/*.c)
+PICOHTTP_OBJS := $(PICOHTTP_SRCS:.c=.o)
+
+PICOTLS_EXCLUDE := \
+    thirdparty/picotls/lib/certificate_compression.c \
+    thirdparty/picotls/lib/fusion.c \
+    thirdparty/picotls/lib/mbedtls.c \
+    thirdparty/picotls/lib/mbedtls_sign.c \
+    thirdparty/picotls/lib/openssl.c
+PICOTLS_SRCS := $(filter-out $(PICOTLS_EXCLUDE), $(wildcard thirdparty/picotls/lib/*.c))
+PICOTLS_OBJS := $(PICOTLS_SRCS:.c=.o)
+
+# micro-ecc provides the secp256r1 curve arithmetic that picotls's uecc.c
+# bridges to ptls_minicrypto_secp256r1 / _init_secp256r1sha256_sign_certificate.
+MICROECC_OBJS := thirdparty/picotls/deps/micro-ecc/uECC.o
+
+PICOQUIC_MBEDTLS_SRCS := $(wildcard thirdparty/picoquic/picoquic_mbedtls/*.c)
+PICOQUIC_MBEDTLS_OBJS := $(PICOQUIC_MBEDTLS_SRCS:.c=.o)
+
+MBEDTLS_EXCLUDE := thirdparty/mbedtls/library/godot_core_mbedtls_platform.c
+MBEDTLS_SRCS := $(filter-out $(MBEDTLS_EXCLUDE), $(wildcard thirdparty/mbedtls/library/*.c))
+MBEDTLS_OBJS := $(MBEDTLS_SRCS:.c=.o)
+
+# loglib provides picoquic_set_qlog and friends (config.c references it).
+LOGLIB_SRCS := $(wildcard thirdparty/picoquic/loglib/*.c)
+LOGLIB_OBJS := $(LOGLIB_SRCS:.c=.o)
+
+# picotls/lib/cifra provides ptls_minicrypto_* symbols. libaegis needs an
+# external <aegis.h> not vendored here; skip it.
+PICOTLS_CIFRA_EXCLUDE := thirdparty/picotls/lib/cifra/libaegis.c
+PICOTLS_CIFRA_SRCS := $(filter-out $(PICOTLS_CIFRA_EXCLUDE), \
+                       $(wildcard thirdparty/picotls/lib/cifra/*.c))
+PICOTLS_CIFRA_OBJS := $(PICOTLS_CIFRA_SRCS:.c=.o)
+
+# cifra internals. Exclude: all test drivers (test*.c) and the curve25519
+# alt-implementations (curve25519.c wraps tweetnacl via #include; the other
+# two are unused variants that would double-define symbols).
+CIFRA_SRCS_ALL := $(wildcard thirdparty/picotls/deps/cifra/src/*.c)
+CIFRA_EXCLUDE := $(wildcard thirdparty/picotls/deps/cifra/src/test*.c) \
+                 thirdparty/picotls/deps/cifra/src/curve25519.donna.c \
+                 thirdparty/picotls/deps/cifra/src/curve25519.naclref.c \
+                 thirdparty/picotls/deps/cifra/src/curve25519.tweetnacl.c
+CIFRA_SRCS := $(filter-out $(CIFRA_EXCLUDE), $(CIFRA_SRCS_ALL))
+CIFRA_OBJS := $(CIFRA_SRCS:.c=.o)
+
+VENDOR_ALL_OBJS := $(PICOQUIC_CORE_OBJS) $(PICOHTTP_OBJS) $(PICOTLS_OBJS) \
+                   $(PICOTLS_CIFRA_OBJS) $(CIFRA_OBJS) $(MICROECC_OBJS) \
+                   $(PICOQUIC_MBEDTLS_OBJS) $(MBEDTLS_OBJS) $(LOGLIB_OBJS)
+
 thirdparty/picoquic/picoquic/%.o: thirdparty/picoquic/picoquic/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picoquic/picohttp/%.o: thirdparty/picoquic/picohttp/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picotls/lib/%.o: thirdparty/picotls/lib/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picoquic/picoquic_mbedtls/%.o: thirdparty/picoquic/picoquic_mbedtls/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/mbedtls/library/%.o: thirdparty/mbedtls/library/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picoquic/loglib/%.o: thirdparty/picoquic/loglib/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picotls/lib/cifra/%.o: thirdparty/picotls/lib/cifra/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picotls/deps/cifra/src/%.o: thirdparty/picotls/deps/cifra/src/%.c
+	@echo "  CC     $@ (vendored, -w)"
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+thirdparty/picotls/deps/micro-ecc/%.o: thirdparty/picotls/deps/micro-ecc/%.c
 	@echo "  CC     $@ (vendored, -w)"
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
 
 # picoquic_link_test forces every PICOQUIC_CORE_OBJS build as a prereq;
 # if any .c in picoquic/ regresses compile, `make test` goes red. The
-# test still only *links* error_names.o (cycle 21a slice); wider link
-# arrives with the picotls/mbedtls slices.
+# test only *links* error_names.o (cycle 21a slice).
 picoquic_link_test: picoquic_link_test.c $(PICOQUIC_CORE_OBJS)
 	@echo "  CC     $@"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ picoquic_link_test.c \
 		thirdparty/picoquic/picoquic/error_names.o $(LDFLAGS)
+
+# Cycle 21c: links the entire vendored object set so picoquic_create
+# can exercise the real TLS initialisation path through mbedtls.
+picoquic_create_test: picoquic_create_test.c $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (full vendored link)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ picoquic_create_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
@@ -104,3 +202,11 @@ test: $(TESTS_BIN)
 clean:
 	rm -f $(TESTS_BIN) webtransportd *.o
 	rm -f thirdparty/picoquic/picoquic/*.o
+	rm -f thirdparty/picoquic/picohttp/*.o
+	rm -f thirdparty/picoquic/picoquic_mbedtls/*.o
+	rm -f thirdparty/picoquic/loglib/*.o
+	rm -f thirdparty/picotls/lib/*.o
+	rm -f thirdparty/picotls/lib/cifra/*.o
+	rm -f thirdparty/picotls/deps/cifra/src/*.o
+	rm -f thirdparty/picotls/deps/micro-ecc/*.o
+	rm -f thirdparty/mbedtls/library/*.o
