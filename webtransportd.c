@@ -71,7 +71,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* picoquic.h pulls in <winsock2.h> on Windows (it gates off _WINDOWS)
+ * and <sys/socket.h> on POSIX, so AF_INET is available from that
+ * include chain on both platforms. The direct sys/socket.h below is
+ * redundant on POSIX and broken on mingw — guard it. */
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 
 static atomic_int g_should_exit = 0;
 

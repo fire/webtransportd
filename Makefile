@@ -19,6 +19,20 @@ CFLAGS  ?= -O0 -g -Wall -Wextra -Werror -std=c11 \
            -fsanitize=address,undefined -fno-omit-frame-pointer -pthread
 LDFLAGS ?= -fsanitize=address,undefined -pthread
 
+# Cycle 40a: on Windows, embed a side-by-side assembly manifest that
+# pins the process's active code page to UTF-8 (Windows 10 1903+).
+# With this embedded, main()'s argv, getenv(), CreateProcessA(), and
+# fopen() all interpret byte strings as UTF-8 — which is what lets
+# --exec=<utf8-path> and friends just work. windres compiles the .rc
+# into a COFF .o that the linker wraps into the .exe's resource
+# section.
+WINDRES ?= windres
+ifeq ($(OS),Windows_NT)
+WINRES_OBJ := webtransportd_rc.o
+else
+WINRES_OBJ :=
+endif
+
 TESTS_SRC := $(wildcard *_test.c)
 TESTS_BIN := $(TESTS_SRC:_test.c=_test)
 
@@ -70,6 +84,15 @@ PICOQUIC_DEFS := \
     -DPTLS_WITHOUT_OPENSSL=1 \
     -DPTLS_WITHOUT_FUSION=1 \
     -DDISABLE_DEBUG_PRINTF=1
+
+# picoquic's headers gate the Win32 socket include block on
+# `_WINDOWS` (MSVC convention), not `_WIN32`. MSYS2/mingw doesn't
+# auto-define `_WINDOWS`, so we have to do it ourselves on Windows
+# builds — otherwise picoquic.h pulls in <arpa/inet.h> and the
+# whole vendored tree fails to compile.
+ifeq ($(OS),Windows_NT)
+PICOQUIC_DEFS += -D_WINDOWS
+endif
 VENDOR_ISYSTEM := \
     -isystem thirdparty/picoquic/picoquic \
     -isystem thirdparty/picoquic/picohttp \
@@ -80,8 +103,38 @@ VENDOR_ISYSTEM := \
     -isystem thirdparty/picotls/deps/cifra/src/ext \
     -isystem thirdparty/picotls/deps/micro-ecc \
     -isystem thirdparty/mbedtls/include
-VENDOR_CFLAGS := -O0 -g -std=c11 -w -pthread \
-                 -fsanitize=address,undefined -fno-omit-frame-pointer \
+
+# On Windows, picotls.c does `#include "wincompat.h"` under _WINDOWS.
+# That shim lives in the Visual Studio build subdir, not on a standard
+# include path, so we have to add it explicitly. It must come *before*
+# `thirdparty/picoquic/picoquic` in the -isystem order: picoquic ships
+# its own `wincompat.h` that picotls's sources would otherwise pick up
+# (picoquic's version is missing <ws2tcpip.h>, so inet_pton is unknown
+# and `struct sockaddr_in6` is incomplete). picoquic's own .c files
+# find their wincompat.h via the source-directory quoted-include
+# search, so moving picotls first doesn't break them.
+ifeq ($(OS),Windows_NT)
+VENDOR_ISYSTEM := -isystem thirdparty/picotls/picotlsvs/picotls $(VENDOR_ISYSTEM)
+endif
+# Sanitizer flags for the vendored TU pile. mingw-w64 doesn't ship
+# libasan so we turn them off on Windows; POSIX keeps them on under
+# the same Makefile contract as our own sources. `-w` silences
+# upstream-only diagnostics so -Werror on our code isn't contaminated
+# by them. `-Wno-error=incompatible-pointer-types` un-promotes gcc
+# 14+'s default-error for cifra's `_BitScanReverse(&uint32_t, ...)`
+# call — `unsigned long *` vs `uint32_t *` are the same size on
+# LLP64 but differently-typed (harmless at the ABI level).
+ifeq ($(OS),Windows_NT)
+VENDOR_SAN :=
+VENDOR_WARN_SUPPRESS := -Wno-error=incompatible-pointer-types \
+                        -Wno-error=implicit-function-declaration \
+                        -Wno-error=int-conversion
+else
+VENDOR_SAN := -fsanitize=address,undefined
+VENDOR_WARN_SUPPRESS :=
+endif
+VENDOR_CFLAGS := -O0 -g -std=c11 -w $(VENDOR_WARN_SUPPRESS) -pthread \
+                 $(VENDOR_SAN) -fno-omit-frame-pointer \
                  $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS)
 
 # Cycle 21b: every file in picoquic/ must compile under VENDOR_CFLAGS.
@@ -195,12 +248,21 @@ webtransportd: webtransportd.c version.h \
                peer_session.c peer_session.h \
                frame.c frame.h \
                log.c log.h \
-               $(VENDOR_ALL_OBJS)
+               $(VENDOR_ALL_OBJS) $(WINRES_OBJ)
 	@echo "  CC     $@ (full vendored link + child_process + peer_session + log)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ webtransportd.c child_process.c peer_session.c \
 		frame.c log.c \
-		$(VENDOR_ALL_OBJS) $(LDFLAGS)
+		$(VENDOR_ALL_OBJS) $(WINRES_OBJ) $(LDFLAGS)
+
+# Cycle 40a: Windows resource object. windres turns the .rc script
+# (which just points at webtransportd.exe.manifest) into a COFF .o
+# the mingw linker wraps into the .exe's resource section. Omitted
+# from POSIX builds (WINRES_OBJ is empty there) so the rule just
+# never fires.
+webtransportd_rc.o: webtransportd.rc webtransportd.exe.manifest
+	@echo "  RC     $@ (UTF-8 manifest)"
+	$(WINDRES) -O coff -o $@ $<
 
 # Cycle 22b: tiny helper child used by handshake_socket_test to prove
 # the daemon's peer_session reader decodes frames off child stdout.
@@ -282,6 +344,15 @@ handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
 	@echo "  CC     $@ (two concurrent loopback clients)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+
+# Cycle 40a: the manifest test checks GetACP() inside its own
+# process, so it needs the manifest linked into the test binary
+# too — not just into webtransportd.exe. The .rc dependency is
+# empty on POSIX ($(WINRES_OBJ) unset), so this rule collapses to
+# a plain self-contained compile there.
+windows_manifest_test: windows_manifest_test.c $(WINRES_OBJ)
+	@echo "  CC     $@ (GetACP() smoke)"
+	$(CC) $(CFLAGS) -o $@ windows_manifest_test.c $(WINRES_OBJ) $(LDFLAGS)
 
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"

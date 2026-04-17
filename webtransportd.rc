@@ -1,0 +1,8 @@
+/* Resource script: bind the UTF-8 activeCodePage manifest into
+ * webtransportd.exe. Resource ID 1 + type 24 (RT_MANIFEST) is the
+ * magic pair Windows looks up when it loads an .exe, so with this
+ * embedded the CRT's main() argv, getenv, and CreateProcessA all
+ * interpret bytes as UTF-8 on Windows 10 1903+ (see memory
+ * project_windows_utf8.md). The .rc file is compiled by windres
+ * into a COFF .o under mingw; see the Makefile's Windows branch. */
+1 24 "webtransportd.exe.manifest"
