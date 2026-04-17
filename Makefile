@@ -44,60 +44,18 @@ frame_helper_test: frame_helper_test.c frame.c frame.h examples/frame-helper.sh
 	@echo "  CC     $@ (frame-helper.sh round-trip)"
 	$(CC) $(CFLAGS) -o $@ frame.c frame_helper_test.c $(LDFLAGS)
 
-# Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
-# object set for picoquic_create/--selftest; 22a adds child_process.c
-# for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so
-# the reader thread can decode the child's framed stdout; 27 adds
-# log.c for --log-level. The -isystem keeps -Werror quiet on
-# picoquic.h / picoquic_packet_loop.h.
-webtransportd: webtransportd.c version.h \
-               child_process.c child_process.h \
-               peer_session.c peer_session.h \
-               frame.c frame.h \
-               log.c log.h \
-               $(VENDOR_ALL_OBJS)
-	@echo "  CC     $@ (full vendored link + child_process + peer_session + log)"
-	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ webtransportd.c child_process.c peer_session.c \
-		frame.c log.c \
-		$(VENDOR_ALL_OBJS) $(LDFLAGS)
-
-# Cycle 22b: tiny helper child used by handshake_socket_test to prove
-# the daemon's peer_session reader decodes frames off child stdout.
-examples/frame_hi: examples/frame_hi.c
-	@echo "  CC     $@"
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-
-# Cycle 32: reference C child — reads framed stdin, re-encodes
-# payload with same flag, writes framed stdout. Links frame.c for
-# the codec so operators can use it as a starting point.
-examples/echo: examples/echo.c frame.c frame.h
-	@echo "  CC     $@ (reference child + frame.c)"
-	$(CC) $(CFLAGS) -I . -o $@ examples/echo.c frame.c $(LDFLAGS)
-
-# version_test fork/execs ./webtransportd, so it needs that binary built
-# first. The test compiles standalone (no matching version.c).
-version_test: version_test.c version.h webtransportd
-	@echo "  CC     $@ (smoke: execs ./webtransportd)"
-	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
-
-# selftest_test fork/execs ./webtransportd --selftest, same pattern.
-selftest_test: selftest_test.c webtransportd
-	@echo "  CC     $@ (smoke: execs ./webtransportd --selftest)"
-	$(CC) $(CFLAGS) -o $@ selftest_test.c $(LDFLAGS)
-
-# Cycle 30: --help prints an operator-friendly summary. Fork/execs
-# the daemon and asserts on a handful of distinctive substrings.
-help_test: help_test.c webtransportd
-	@echo "  CC     $@ (smoke: execs ./webtransportd --help)"
-	$(CC) $(CFLAGS) -o $@ help_test.c $(LDFLAGS)
-
 # Cycles 21a-b: vendored picoquic bring-up. The include paths use
 # -isystem so our -Werror doesn't trip on third-party headers; vendored
 # .c files compile under VENDOR_CFLAGS which keeps sanitizers on but
 # drops -Werror (they are not our source to clean). Include paths cover
 # picoquic's own transitive header needs (picotls for ech.c / tls_api.c
 # and the crypto bridges, mbedtls for the picoquic_mbedtls.c bridge).
+#
+# NOTE: these definitions MUST live above the `webtransportd:` target
+# because GNU make expands prerequisite lists when a rule is read, not
+# when it fires. Defining VENDOR_ALL_OBJS later meant the prerequisite
+# silently expanded to the empty string, so CI (starting from a clean
+# tree) tried to link .o files that had never been scheduled to build.
 PICOQUIC_ISYSTEM := -isystem thirdparty/picoquic/picoquic
 PICOQUIC_DEFS := \
     -DPICOQUIC_WITH_MBEDTLS=1 \
@@ -217,6 +175,54 @@ thirdparty/picotls/deps/cifra/src/%.o: thirdparty/picotls/deps/cifra/src/%.c
 thirdparty/picotls/deps/micro-ecc/%.o: thirdparty/picotls/deps/micro-ecc/%.c
 	@echo "  CC     $@ (vendored, -w)"
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+# Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
+# object set for picoquic_create/--selftest; 22a adds child_process.c
+# for the --exec=BIN spawn path; 22b adds peer_session.c + frame.c so
+# the reader thread can decode the child's framed stdout; 27 adds
+# log.c for --log-level. The -isystem keeps -Werror quiet on
+# picoquic.h / picoquic_packet_loop.h.
+webtransportd: webtransportd.c version.h \
+               child_process.c child_process.h \
+               peer_session.c peer_session.h \
+               frame.c frame.h \
+               log.c log.h \
+               $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (full vendored link + child_process + peer_session + log)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ webtransportd.c child_process.c peer_session.c \
+		frame.c log.c \
+		$(VENDOR_ALL_OBJS) $(LDFLAGS)
+
+# Cycle 22b: tiny helper child used by handshake_socket_test to prove
+# the daemon's peer_session reader decodes frames off child stdout.
+examples/frame_hi: examples/frame_hi.c
+	@echo "  CC     $@"
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+# Cycle 32: reference C child — reads framed stdin, re-encodes
+# payload with same flag, writes framed stdout. Links frame.c for
+# the codec so operators can use it as a starting point.
+examples/echo: examples/echo.c frame.c frame.h
+	@echo "  CC     $@ (reference child + frame.c)"
+	$(CC) $(CFLAGS) -I . -o $@ examples/echo.c frame.c $(LDFLAGS)
+
+# version_test fork/execs ./webtransportd, so it needs that binary built
+# first. The test compiles standalone (no matching version.c).
+version_test: version_test.c version.h webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd)"
+	$(CC) $(CFLAGS) -o $@ version_test.c $(LDFLAGS)
+
+# selftest_test fork/execs ./webtransportd --selftest, same pattern.
+selftest_test: selftest_test.c webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd --selftest)"
+	$(CC) $(CFLAGS) -o $@ selftest_test.c $(LDFLAGS)
+
+# Cycle 30: --help prints an operator-friendly summary. Fork/execs
+# the daemon and asserts on a handful of distinctive substrings.
+help_test: help_test.c webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd --help)"
+	$(CC) $(CFLAGS) -o $@ help_test.c $(LDFLAGS)
 
 # picoquic_link_test forces every PICOQUIC_CORE_OBJS build as a prereq;
 # if any .c in picoquic/ regresses compile, `make test` goes red. The
