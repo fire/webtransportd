@@ -39,6 +39,27 @@
 
 static atomic_int g_should_exit = 0;
 
+static const char *picohttp_event_name(picohttp_call_back_event_t event) {
+	switch (event) {
+	case picohttp_callback_get: return "GET";
+	case picohttp_callback_post: return "POST";
+	case picohttp_callback_connecting: return "connecting";
+	case picohttp_callback_connect: return "CONNECT";
+	case picohttp_callback_connect_refused: return "CONNECT_refused";
+	case picohttp_callback_connect_accepted: return "CONNECT_accepted";
+	case picohttp_callback_post_data: return "post_data";
+	case picohttp_callback_post_fin: return "post_fin";
+	case picohttp_callback_provide_data: return "provide_data";
+	case picohttp_callback_post_datagram: return "post_datagram";
+	case picohttp_callback_provide_datagram: return "provide_datagram";
+	case picohttp_callback_reset: return "reset";
+	case picohttp_callback_stop_sending: return "stop_sending";
+	case picohttp_callback_deregister: return "deregister";
+	case picohttp_callback_free: return "free";
+	default: return "?";
+	}
+}
+
 typedef struct server_ctx server_ctx_t;
 
 typedef struct wtd_peer {
@@ -131,12 +152,8 @@ static void drain_outbound(wtd_peer_t *p) {
 
 	wtd_outbound_frame_t *frame = wtd_work_queue_drain(&p->session.outbound);
 	if (frame == NULL) {
-		wtd_log(WTD_LOG_TRACE,
-				"[Cycle 51] drain_outbound: no frames in queue");
 		return;
 	}
-
-	wtd_log(WTD_LOG_TRACE, "[Cycle 51] drain_outbound: processing frames");
 	while (frame != NULL) {
 		wtd_outbound_frame_t *next = frame->next;
 
@@ -153,7 +170,7 @@ static void drain_outbound(wtd_peer_t *p) {
 						frame->payload, add_ret);
 			} else {
 				wtd_log(WTD_LOG_WARN,
-						"[Cycle 51] drain_outbound: "
+						" drain_outbound: "
 						"data_stream_id not set for flag=0");
 			}
 		} else {
@@ -217,10 +234,10 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 
 	if (p != NULL) {
 		wtd_log(WTD_LOG_TRACE,
-				"[Cycle 51] wt_session_cb: event=%d stream=%" PRIu64
-				" length=%zu control_stream=%" PRIu64,
-				(int)event, stream_ctx->stream_id, length,
-				p->control_stream_id);
+				"wt_session_cb: event=%s stream=%" PRIu64
+				" length=%zu",
+				picohttp_event_name(event), stream_ctx->stream_id,
+				length);
 	}
 
 	switch (event) {
@@ -231,19 +248,19 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 		}
 		if (stream_ctx->stream_id == p->control_stream_id) {
 			wtd_log(WTD_LOG_TRACE,
-					"[Cycle 51] post_data on control stream "
+					" post_data on control stream "
 					"(capsule), skipping");
 			break;
 		}
 		if (p->data_stream_id == UINT64_MAX) {
 			p->data_stream_id = stream_ctx->stream_id;
 			wtd_log(WTD_LOG_TRACE,
-					"[Cycle 51] data_stream_id set to %" PRIu64,
+					" data_stream_id set to %" PRIu64,
 					p->data_stream_id);
 		}
 		if (length == 0) {
 			wtd_log(WTD_LOG_TRACE,
-					"[Cycle 51] post_data: length==0, skipping");
+					" post_data: length==0, skipping");
 			break;
 		}
 		uint8_t frame_buf[4096];
@@ -254,12 +271,12 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 			ssize_t nwritten = write(p->child.stdin_fd,
 					frame_buf, frame_len);
 			wtd_log(WTD_LOG_TRACE,
-					"[Cycle 51] wrote %zu bytes to "
+					" wrote %zu bytes to "
 					"child stdin (ret=%zd)",
 					frame_len, nwritten);
 		} else {
 			wtd_log(WTD_LOG_ERROR,
-					"[Cycle 51] wtd_frame_encode "
+					" wtd_frame_encode "
 					"failed: %d", ret2);
 		}
 		break;
@@ -278,12 +295,12 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 				ssize_t nwritten = write(p->child.stdin_fd,
 						frame_buf, frame_len);
 				wtd_log(WTD_LOG_TRACE,
-						"[Cycle 51] datagram: wrote %zu "
+						" datagram: wrote %zu "
 						"bytes to child stdin (ret=%zd)",
 						frame_len, nwritten);
 			} else {
 				wtd_log(WTD_LOG_ERROR,
-						"[Cycle 51] datagram: "
+						" datagram: "
 						"wtd_frame_encode failed: %d",
 						ret2);
 			}
@@ -355,7 +372,7 @@ static int server_loop_cb(picoquic_quic_t *quic,
 
 	if (peer_count > 0) {
 		wtd_log(WTD_LOG_TRACE,
-				"[Cycle 51] server_loop_cb: drained %d peers",
+				" server_loop_cb: drained %d peers",
 				peer_count);
 	}
 

@@ -228,10 +228,6 @@ static int wt_client_cb(picoquic_cnx_t *cnx, uint8_t *bytes,
 	client_ctx_t *c = (client_ctx_t *)path_app_ctx;
 	(void)stream_ctx;
 
-	fprintf(stderr, "[CLIENT] wt_client_cb: event=%d stream=%" PRIu64
-			" length=%zu\n",
-			(int)fin_or_event, stream_ctx ? stream_ctx->stream_id : UINT64_MAX,
-			length);
 
 	switch (fin_or_event) {
 	case picohttp_callback_connecting:
