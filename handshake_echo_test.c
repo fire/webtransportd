@@ -53,10 +53,17 @@ static int failures = 0;
 #define FAIL(msg) do { fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, msg); failures++; } while (0)
 #define EXPECT(cond) do { if (!(cond)) FAIL(#cond); } while (0)
 
-/* Cycle 33: pid-derived port, see handshake_socket_test.c banner. */
+/* Cycle 33: pid-derived port, see handshake_socket_test.c banner.
+ * Cycle 40c: UTF-8 sentinel bytes in PAYLOAD / DGRAM_PAYLOAD prove
+ * the whole pipeline (QUIC stream/datagram → daemon frame codec →
+ * child stdin pipe → examples/echo round-trip → child stdout pipe
+ * → daemon frame decode → outbound echo) is byte-transparent for
+ * non-ASCII UTF-8. "w日r" = `w (0x77) + 日 (U+65E5 → e6 97 a5) +
+ * r (0x72)`; "d本m" = `d + 本 (U+672C → e6 9c ac) + m`. Both are
+ * 5 bytes so the existing length assertions still hold. */
 static uint16_t SERVER_PORT;
-static const char PAYLOAD[] = "world";
-static const char DGRAM_PAYLOAD[] = "dgram";
+static const char PAYLOAD[] = "w\xe6\x97\xa5r";       /* w日r, 5 bytes */
+static const char DGRAM_PAYLOAD[] = "d\xe6\x9c\xacm"; /* d本m, 5 bytes */
 
 typedef struct {
 	pid_t pid;
@@ -386,8 +393,8 @@ int main(void) {
 	char log[2048];
 	size_t log_len = 0;
 	drain_stdout(d.stdout_fd, log, sizeof(log), &log_len, 500);
-	EXPECT(strstr(log, "outbound frame: flag=0 len=5 payload=world") != NULL);
-	EXPECT(strstr(log, "outbound frame: flag=1 len=5 payload=dgram") != NULL);
+	EXPECT(strstr(log, "outbound frame: flag=0 len=5 payload=w\xe6\x97\xa5r") != NULL);
+	EXPECT(strstr(log, "outbound frame: flag=1 len=5 payload=d\xe6\x9c\xacm") != NULL);
 
 	int status = 0;
 	kill_and_reap(&d, &status);
