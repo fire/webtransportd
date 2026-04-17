@@ -231,11 +231,59 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   passes as long as the right sections exist, doesn't break
   every time the prose is polished.
 
-## Next up
+## Wanted (roughly prioritized)
 
-(Nothing queued for v0.1 scope — streams + datagrams + child pipe
-round-trip end-to-end, multi-client works without cross-contamination.
-Below: follow-up polish and v0.2-ish features.)
+Nothing blocking the v0.1 echo — the daemon handshakes, round-trips
+streams + datagrams through a child process, forwards child stderr,
+and keeps concurrent clients isolated. These are the next genuinely
+useful slices, rough order of leverage-per-effort:
+
+1. **`--cert=auto`** — generate a self-signed cert+key in-memory via
+   mbedtls so the daemon boots without a PEM pair on disk. Uses
+   `mbedtls_x509write_crt_*` + `mbedtls_pk_write_key_der` + the
+   existing `picoquic_set_tls_certificate_chain` /
+   `picoquic_set_tls_key` pair. Opens the door to `--cert=auto`
+   **persistence** as a follow-up (survives restart).
+2. **Per-peer flow control.** When a child's stdin pipe fills, the
+   current `write_all` just blocks the packet loop thread. Detect
+   partial writes, stash the remaining frame on the peer, and apply
+   WT stream-level backpressure instead of ever blocking the loop.
+   For datagrams: drop + metric on overflow (already unreliable).
+3. **8-byte varint encode + configurable `WTD_FRAME_MAX_PAYLOAD`.**
+   Cycle 25 already added the decode side. Extend `varint_encode`
+   and bump MAX above 2^30 so large reliable payloads don't force
+   a session close. Smallest behavioural test: encode a 2^30-byte
+   payload via a synthetic wrapper (no 1 GB buffer needed).
+4. **`child_process_win.c`.** Today `child_process.c` is POSIX
+   (fork + execvp + three pipe()s). Windows needs `CreateProcessW`
+   + three `CreatePipe`s + `SetHandleInformation` so they survive
+   exec. Test shape mirrors cycle 16.
+5. **`--dir=<path>` / `--staticdir=<path>`** — serve static files
+   on non-WT request paths, mirroring websocketd's `http.go`.
+   Needed for the devconsole story.
+6. **libFuzzer-driven frame fuzz.** Cycle 24 is a deterministic
+   random harness; coverage-guided fuzz catches the rare-prefix
+   bug much faster. Needs a `LLVMFuzzerTestOneInput` shim and a
+   seed corpus; build with `-fsanitize=fuzzer`.
+
+## Ship prep
+
+- **CI**: `.github/workflows/webtransportd.yml` — three-job matrix
+  (`linux-gcc`, `macos-clang`, `windows-clang-cl`),
+  `actions/checkout@v4`, compiler toolchain only (no TLS package
+  dependency), `make test` + `./webtransportd --version` smoke,
+  upload the binary via `actions/upload-artifact@v4`. Treat
+  warnings as errors (`-Werror` / `/WX`).
+- **Makefile.win** + **sources.mk** so POSIX `make` and Windows
+  `nmake` share one source list.
+- **Docs**: top-level `README.md` (usage, framing spec, CLI flags,
+  relationship to Godot), `LICENSE` (BSD-2 for our code; upstream
+  libs keep their own licenses under `thirdparty/*/LICENSE*`),
+  `AUTHORS`, `CHANGES`.
+- **Examples**: `examples/echo.c` (smallest compliant child),
+  `examples/echo.sh` + `examples/frame-helper.sh` (shell-friendly
+  framing helpers). `examples/frame_hi.c` already exists as the
+  cycle-22b test helper.
 
 ## Design notes
 
@@ -271,39 +319,6 @@ Instead of `picoquic_start_network_thread`, the daemon builds a
 return `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`. No pthread, no
 `picoquic_wake_up_network_thread`, no thread-join dance — one event
 loop with one exit path.
-
-## After the daemon works
-
-- **CI**: `.github/workflows/webtransportd.yml` — three-job matrix
-  (`linux-gcc`, `macos-clang`, `windows-clang-cl`), `actions/checkout@v4`,
-  only compiler toolchain installed (no TLS package), `make test`
-  must pass, `./webtransportd --version` smoke, upload the built
-  binary via `actions/upload-artifact@v4`. Treat warnings as errors
-  (`-Werror` / `/WX`).
-- **Windows parity**: `Makefile.win` + `sources.mk` so the POSIX and
-  `nmake` paths share the same source list.
-- **Docs**: top-level `README.md` (usage, framing spec, CLI flags,
-  relationship to Godot), `LICENSE` (BSD-2 for the daemon we author;
-  upstream libs keep their own licenses in `thirdparty/*/LICENSE*`),
-  `AUTHORS`, `CHANGES`.
-- **Examples**: `examples/echo.c` (smallest compliant child),
-  `examples/echo.sh` + `examples/frame-helper.sh` (shell-friendly
-  framing helpers). `examples/frame_hi.c` already exists as the
-  cycle-22b test helper.
-
-## Future cycles (once v0.1 ships)
-
-- Upgrade the frame fuzz harness to libFuzzer (coverage-guided;
-  cycle 24 is a deterministic random harness).
-- `--cert=auto` persistence — generated cert+key survive restart.
-- Per-peer flow control: apply WT stream backpressure when the
-  child's stdin pipe fills, instead of dropping unreliable frames.
-- 8-byte varint *encode* + configurable `WTD_FRAME_MAX_PAYLOAD`
-  above 2^30 so large reliable payloads don't force session close
-  (cycle 25 added the decode side).
-- Real `child_process_win.c` (today's impl is POSIX-only).
-- `--dir` / `--staticdir` — serve static files on non-WT paths for
-  devconsole, mirroring websocketd's `http.go`.
 
 ## Guiding principles
 
