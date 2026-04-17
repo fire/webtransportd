@@ -2,9 +2,16 @@
 *_test
 *_test.dSYM/
 
-# Daemon binary
+# Daemon binaries
 /webtransportd
+/webtransportd_http3
 /webtransportd.dSYM/
+
+# HTTP/3 test binaries
+/minimal_http3_server
+/minimal_http3_client
+/http3_server_with_child
+/handshake_echo_http3
 
 # Example helper binaries
 /examples/frame_hi
