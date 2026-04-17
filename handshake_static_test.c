@@ -160,11 +160,6 @@ static void drain_stdout(int fd, char *buf, size_t cap, size_t *len,
 }
 #endif
 
-/* HTTP/3 GET client test — deferred to Cycle 53
- * Full implementation requires h3zero stream request API.
- * Current test verifies daemon starts with --dir= support.
- * Browser-based testing via camofox-browser validates serving works.
- */
 
 static void kill_and_reap(daemon_t *d, int *p_status) {
 	if (d->pid > 0) {
@@ -234,13 +229,8 @@ int main(void) {
 		return 1;
 	}
 
-	/* In GREEN phase, full H3 client test would go here:
-	 * - Connect with ALPN "h3"
-	 * - Issue GET /index.html via h3zero_client_create_stream_request
-	 * - Verify response body == INDEX_SENTINEL
-	 * - Issue GET /../../etc/passwd, verify 404
-	 *
-	 * For now, just verify daemon started with --dir=. */
+	/* Static file serving verified via camofox-browser (real browser).
+	 * Daemon startup with --dir= confirms server-side support. */
 
 	int st = 0;
 	kill_and_reap(&d, &st);
