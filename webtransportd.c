@@ -284,8 +284,9 @@ static void drain_peer(wtd_peer_t *p) {
 	wtd_outbound_frame_t *head = wtd_work_queue_drain(&p->peer_session.outbound);
 	while (head != NULL) {
 		wtd_outbound_frame_t *next = head->next;
-		printf("outbound frame: flag=%u len=%zu payload=",
-				(unsigned)head->flag, head->payload_len);
+		printf("outbound frame: flag=%u len=%llu payload=",
+				(unsigned)head->flag,
+				(unsigned long long)head->payload_len);
 		(void)fwrite(head->payload, 1, head->payload_len, stdout);
 		printf("\n");
 		fflush(stdout);
