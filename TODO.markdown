@@ -15,21 +15,23 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 
 | Module          | Cycles | Subject                                                              |
 | --------------- | :----: | -------------------------------------------------------------------- |
-| `frame`         | 1–11, 24–25 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness |
+| `frame`         | 1–11, 24–25, 34 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness; shell framing helper |
 | `log`           | 12, 28 | Level filter, thread-safe mutex-guarded stderr emit, `[LEVEL]` prefix |
 | `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
-| `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
+| `child_process` | 16, 37 | POSIX `fork + execvp` + Win32 `CreateProcessA` + `CreatePipe`; 3 pipes, SIGTERM / TerminateProcess + reap |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
-| `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–30  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list + richer `--help` |
+| `thirdparty/`   | 21a–c, 38 | Vendored picoquic + picohttp + picotls + mbedtls compile and link; Makefile ordering so CI builds from clean |
+| `webtransportd` | 19–30, 33 | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list + richer `--help` + pid-derived port for test isolation |
+| ship prep       | 31–36  | `LICENSE`, `examples/echo.c`, `examples/frame-helper.sh`, `AUTHORS`, `CHANGES`, CI workflow (linux/macOS/Windows) |
 
-All work lives in one directory under ASAN+UBSAN. 15 test binaries green:
+All work lives in one directory under ASAN+UBSAN. 16 test binaries green:
 
 ```
 $ make test
   RUN    ./child_process_test
   RUN    ./env_test
   RUN    ./frame_fuzz_test
+  RUN    ./frame_helper_test
   RUN    ./frame_test
   RUN    ./handshake_echo_test
   RUN    ./handshake_multi_test
@@ -231,6 +233,92 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   passes as long as the right sections exist, doesn't break
   every time the prose is polished.
 
+### Cycles 31–38 — ship prep, portability, and CI
+
+- **31** — **BSD-2-Clause `LICENSE`.** Covers our source; notes
+  vendored subtrees keep their own upstream licences (picoquic
+  BSD-3, picotls BSD-2, mbedtls Apache-2.0, cifra public-domain).
+- **32** — **`examples/echo.c` reference child.** A minimal C
+  child that decodes framed stdin with `wtd_frame_decode`,
+  re-encodes the payload with the same flag via
+  `wtd_frame_encode`, and writes it to stdout. Byte-equivalent
+  to `/bin/cat` for the daemon's use case, but actually
+  exercises the frame codec on the child side. `handshake_echo_test`
+  switched from `/bin/cat` to `examples/echo` so a mutation in
+  the reference child is caught by the existing echo assertions.
+- **33** — **pid-derived port for daemon-launch tests.** The
+  three tests that fork/exec `./webtransportd --server`
+  (`handshake_socket_test`, `handshake_echo_test`,
+  `handshake_multi_test`) now use
+  `SERVER_PORT = 20000 + (getpid() & 0x1fff)`. A stale daemon
+  from a previous failed run lands on a different port once its
+  pid is reused, dramatically reducing flakiness on retry loops.
+- **34** — **`examples/frame-helper.sh` + `frame_helper_test`.**
+  A shell helper that emits one framed envelope to stdout;
+  delegates varint math to a `python3` heredoc so the shell
+  stays trivial. `frame_helper_test` execs the script, reads
+  its output, decodes with `wtd_frame_decode`, and asserts the
+  decoded flag + payload match what we asked for. Proves the
+  framing spec is reproducible outside the C codec.
+- **35** — **`AUTHORS` and `CHANGES`.** `AUTHORS` lists the
+  project authors; `CHANGES` tracks user-visible notes per
+  cycle from v0.1 onward. Lightweight — no automation, just
+  a file to keep PRs honest.
+- **36** — **GitHub Actions CI matrix.**
+  `.github/workflows/webtransportd.yml` runs three jobs on
+  every push: `linux-gcc` (ubuntu-latest), `macos-clang`
+  (macos-latest), `windows-mingw` (MSYS2 + mingw-w64). The
+  two POSIX jobs run `make test` under ASAN+UBSAN; the
+  Windows job overrides `CFLAGS`/`LDFLAGS` to disable
+  sanitizers because mingw's ASAN is unreliable. All three
+  smoke `--version` and upload the built binary as an
+  artifact.
+- **37** — **Win32 `child_process.c`.** Added an `#ifdef _WIN32`
+  branch in the same TU: `CreatePipe` ×3 with
+  `SetHandleInformation(HANDLE_FLAG_INHERIT, 0)` on the
+  parent-side ends, a small `build_cmdline()` to flatten argv
+  with space-quoting, `CreateProcessA` with
+  `STARTF_USESTDHANDLES`, and `_open_osfhandle` to wrap the
+  pipe `HANDLE`s as CRT file descriptors so the daemon's
+  existing `read` / `write` / `close` calls work unchanged.
+  `wtd_child_terminate` on Win32 closes stdin → waits 500 ms
+  for graceful exit → `TerminateProcess` + `WaitForSingleObject`
+  → `CloseHandle`. `WTD_CHILD_PID_NONE` hides the pid_t-vs-HANDLE
+  switch from callers. `child_process_test.c` is still POSIX-only
+  (`/bin/cat`); the handshake tests cover the Win32 path once
+  they port.
+- **38** — **Makefile ordering fix (CI unblock).** The
+  `webtransportd:` target listed `$(VENDOR_ALL_OBJS)` as a
+  prerequisite, but the variable was defined ~130 lines later.
+  GNU make expands prerequisite lists when the rule is read,
+  not when it fires, so the expansion silently yielded the
+  empty string and none of the ~180 vendored `.o` files were
+  scheduled to build. Local macOS worked by accident because
+  prior builds had left `.o` files in the tree; CI starts
+  clean and the link step bombed with "no such file or
+  directory" across all three matrix jobs (run 24546542095).
+  Moved the vendor variable blocks + pattern rules above the
+  `webtransportd:` rule and added a comment noting the
+  ordering is load-bearing. `make clean && make test` on a
+  fully clean tree now builds from scratch and goes green.
+- **39** — **Linux + Windows CI platform fixes.** Cycle 38
+  unblocked the build, which then tripped two platform issues
+  macOS/clang had hidden. glibc under `-std=c11` gates POSIX
+  symbols (`strdup`, `setenv`, `unsetenv`, `environ`) behind
+  feature-test macros; with none set, `-Werror` turned the
+  implicit declarations into hard errors. Added
+  `-D_GNU_SOURCE -D_DARWIN_C_SOURCE` to `CFLAGS`: the glibc
+  macro exposes POSIX-2008 symbols, the Darwin macro keeps
+  BSD extensions visible on macOS when `_POSIX_C_SOURCE`-style
+  gating is in force, and both are no-ops on mingw. Separately,
+  `child_process_test.c`'s POSIX-only helpers (`read_full` +
+  `cycle16_cat_echo`) compared `child.pid` against integers,
+  which doesn't compile when `pid` is a `HANDLE` (void *) on
+  Win32 — `main()` already skipped calling them via
+  `#ifdef _WIN32`, but gcc still compiled the bodies. Wrapped
+  both helpers in `#ifndef _WIN32`. A dedicated Win32 unit
+  test using `cmd.exe` + `findstr` remains on the wanted list.
+
 ## Wanted (roughly prioritized)
 
 Nothing blocking the v0.1 echo — the daemon handshakes, round-trips
@@ -289,8 +377,10 @@ useful slices, rough order of leverage-per-effort:
   `windows-mingw` (MSYS2 + mingw-w64). POSIX jobs run `make test`
   under ASAN+UBSAN; Windows disables sanitizers via CFLAGS/LDFLAGS
   env overrides because mingw's ASAN is unreliable. All three
-  smoke `--version` and upload the binary. `windows-clang-cl`
-  stays wanted for when a native `child_process_win.c` lands.
+  smoke `--version` and upload the binary. Cycle 38 fixed a
+  Makefile-ordering bug that broke every clean-tree build (local
+  macOS hid it behind stale `.o` files in the working copy).
+  `windows-clang-cl` stays wanted for a native MSVC build.
 - **Makefile.win** + **sources.mk** so POSIX `make` and Windows
   `nmake` share one source list.
 - **Docs**: top-level `README.md` (usage, framing spec, CLI flags,
