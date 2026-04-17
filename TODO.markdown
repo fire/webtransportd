@@ -21,9 +21,9 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–29  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list |
+| `webtransportd` | 19–30  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list + richer `--help` |
 
-All work lives in one directory under ASAN+UBSAN. 14 test binaries green:
+All work lives in one directory under ASAN+UBSAN. 15 test binaries green:
 
 ```
 $ make test
@@ -35,6 +35,7 @@ $ make test
   RUN    ./handshake_multi_test
   RUN    ./handshake_socket_test
   RUN    ./handshake_test
+  RUN    ./help_test
   RUN    ./log_test
   RUN    ./peer_session_test
   RUN    ./picoquic_create_test
@@ -219,6 +220,16 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   ("aaaaa" and "bbbbb") against one `--exec=/bin/cat` daemon,
   asserts each client receives its own five bytes and none of
   the other's, and that the daemon log shows both outbound frames.
+- **30** — **operator-friendly `--help`.** `print_usage` now
+  includes a one-line description, a subcommand-by-subcommand
+  summary (`--version` / `--selftest` / `--server`), an indented
+  options table, and a short note about the on-pipe framing
+  format (`flag | varint len | payload`). `help_test` fork/execs
+  `./webtransportd --help`, checks exit 0, and asserts on a
+  handful of distinctive substrings (`WebTransport`, every
+  supported flag, `framing:`, `varint`). Tolerant by design —
+  passes as long as the right sections exist, doesn't break
+  every time the prose is polished.
 
 ## Next up
 

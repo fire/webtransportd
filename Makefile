@@ -71,6 +71,12 @@ selftest_test: selftest_test.c webtransportd
 	@echo "  CC     $@ (smoke: execs ./webtransportd --selftest)"
 	$(CC) $(CFLAGS) -o $@ selftest_test.c $(LDFLAGS)
 
+# Cycle 30: --help prints an operator-friendly summary. Fork/execs
+# the daemon and asserts on a handful of distinctive substrings.
+help_test: help_test.c webtransportd
+	@echo "  CC     $@ (smoke: execs ./webtransportd --help)"
+	$(CC) $(CFLAGS) -o $@ help_test.c $(LDFLAGS)
+
 # Cycles 21a-b: vendored picoquic bring-up. The include paths use
 # -isystem so our -Werror doesn't trip on third-party headers; vendored
 # .c files compile under VENDOR_CFLAGS which keeps sanitizers on but

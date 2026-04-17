@@ -82,10 +82,28 @@ static void on_sigterm(int sig) {
 
 static int print_usage(FILE *out) {
 	fprintf(out,
-			"usage: webtransportd --version\n"
-			"       webtransportd --selftest\n"
-			"       webtransportd --server --cert=<pem> --key=<pem> --port=<N>\n"
-			"                    [--exec=<bin>] [--log-level=<0..4>]\n");
+			"webtransportd: a WebTransport/QUIC daemon that exec's a child\n"
+			"  process per accepted session and pipes data between the WT\n"
+			"  session and the child's stdin/stdout. Modeled on websocketd.\n"
+			"\n"
+			"usage:\n"
+			"  webtransportd --version\n"
+			"      Print version string and exit.\n"
+			"  webtransportd --selftest\n"
+			"      Exercise the picoquic + mbedtls TLS init path and exit.\n"
+			"  webtransportd --server --cert=<pem> --key=<pem> --port=<N> [options]\n"
+			"      Listen for QUIC connections on UDP port <N>, TLS via\n"
+			"      <cert>+<key>. Runs until SIGTERM/SIGINT.\n"
+			"      options:\n"
+			"        --exec=<bin>        Spawn <bin> on each accepted\n"
+			"                            connection; frame its stdin/stdout.\n"
+			"        --log-level=<0..4>  QUIET / ERROR / WARN / INFO / TRACE\n"
+			"                            (default INFO).\n"
+			"\n"
+			"framing: bytes on the child's stdin and stdout are\n"
+			"  [flag | varint len | payload]. flag bit 0 selects reliable\n"
+			"  (0, WT stream) vs unreliable (1, WT datagram); bits 1-7 are\n"
+			"  reserved and must be zero.\n");
 	return 0;
 }
 
