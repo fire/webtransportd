@@ -445,6 +445,11 @@ windows_manifest_test: windows_manifest_test.c $(WINRES_OBJ)
 	@echo "  CC     $@ (GetACP() smoke)"
 	$(CC) $(CFLAGS) -o $@ windows_manifest_test.c $(WINRES_OBJ) $(LDFLAGS)
 
+handshake_http3_test: handshake_http3_test.c $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (HTTP/3 test)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(VENDOR_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_http3_test.c $(VENDOR_ALL_OBJS) $(WINDOWS_LDEXTRA) $(WINDOWS_LIBS) $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
