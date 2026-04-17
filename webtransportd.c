@@ -163,9 +163,9 @@ static void drain_outbound(wtd_peer_t *p) {
 						p->data_stream_id,
 						frame->payload, frame->payload_len, 0);
 				wtd_log(WTD_LOG_TRACE,
-						"outbound frame: flag=%d len=%zu "
+						"outbound frame: flag=%d len=%lu "
 						"payload=%.*s (picoquic_add returned %d)",
-						frame->flag, frame->payload_len,
+						frame->flag, (unsigned long)frame->payload_len,
 						(int)frame->payload_len,
 						frame->payload, add_ret);
 			} else {
@@ -185,9 +185,9 @@ static void drain_outbound(wtd_peer_t *p) {
 				h3zero_set_datagram_ready(p->cnx,
 						p->control_stream_id);
 				wtd_log(WTD_LOG_TRACE,
-						"outbound frame: flag=%d len=%zu "
+						"outbound frame: flag=%d len=%lu "
 						"payload=%.*s",
-						frame->flag, frame->payload_len,
+						frame->flag, (unsigned long)frame->payload_len,
 						(int)frame->payload_len,
 						frame->payload);
 			}
@@ -235,9 +235,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 	if (p != NULL) {
 		wtd_log(WTD_LOG_TRACE,
 				"wt_session_cb: event=%s stream=%" PRIu64
-				" length=%zu",
+				" length=%lu",
 				picohttp_event_name(event), stream_ctx->stream_id,
-				length);
+				(unsigned long)length);
 	}
 
 	switch (event) {
@@ -271,9 +271,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 			ssize_t nwritten = write(p->child.stdin_fd,
 					frame_buf, frame_len);
 			wtd_log(WTD_LOG_TRACE,
-					" wrote %zu bytes to "
-					"child stdin (ret=%zd)",
-					frame_len, nwritten);
+					" wrote %lu bytes to "
+					"child stdin (ret=%ld)",
+					(unsigned long)frame_len, (long)nwritten);
 		} else {
 			wtd_log(WTD_LOG_ERROR,
 					" wtd_frame_encode "
@@ -295,9 +295,9 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 				ssize_t nwritten = write(p->child.stdin_fd,
 						frame_buf, frame_len);
 				wtd_log(WTD_LOG_TRACE,
-						" datagram: wrote %zu "
-						"bytes to child stdin (ret=%zd)",
-						frame_len, nwritten);
+						" datagram: wrote %lu "
+						"bytes to child stdin (ret=%ld)",
+						(unsigned long)frame_len, (long)nwritten);
 			} else {
 				wtd_log(WTD_LOG_ERROR,
 						" datagram: "
