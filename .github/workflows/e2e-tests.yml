@@ -1,0 +1,72 @@
+name: End-to-End Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install camofox-browser
+        run: |
+          cd /tmp
+          git clone https://github.com/jo-inc/camofox-browser.git
+          cd camofox-browser
+          npm install
+      
+      - name: Build webtransportd
+        run: make webtransportd handshake_echo_test
+      
+      - name: Create test site
+        run: |
+          mkdir -p /tmp/wtd-demo
+          echo "hello from static site" > /tmp/wtd-demo/index.html
+      
+      - name: Start camofox-browser
+        run: |
+          cd /tmp/camofox-browser
+          timeout 120 npm start > /tmp/camofox.log 2>&1 &
+          sleep 10
+      
+      - name: Start webtransportd daemon
+        run: |
+          cd $GITHUB_WORKSPACE
+          timeout 120 ./webtransportd --server --cert=auto --port=28765 \
+            --dir=/tmp/wtd-demo --exec=./examples/echo > /tmp/wtd.log 2>&1 &
+          sleep 3
+      
+      - name: Run unit tests
+        run: |
+          make test 2>&1 | tee /tmp/test.log
+          grep -q "OK     all tests passed" /tmp/test.log || exit 1
+      
+      - name: Run echo test
+        run: timeout 20 ./handshake_echo_test 2>&1 | tee /tmp/echo-test.log
+      
+      - name: Check echo test results
+        run: |
+          grep -q "\[TEST\] cli_rc=0" /tmp/echo-test.log || exit 1
+          echo "✓ Echo test passed"
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            /tmp/camofox.log
+            /tmp/wtd.log
+            /tmp/test.log
+            /tmp/echo-test.log
+
