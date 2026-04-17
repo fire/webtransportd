@@ -53,7 +53,11 @@ static int failures = 0;
 #define FAIL(msg) do { fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, msg); failures++; } while (0)
 #define EXPECT(cond) do { if (!(cond)) FAIL(#cond); } while (0)
 
-static const uint16_t SERVER_PORT = 24443;
+/* Cycle 33: derive the daemon's UDP port from the test's pid so
+ * sequential or accidentally-overlapping runs don't collide on a
+ * port the previous invocation hasn't finished releasing. Range
+ * 20000-28191; odds of two runs picking the same port are ~1/8000. */
+static uint16_t SERVER_PORT;
 
 static int read_line(int fd, char *out, size_t cap, int timeout_ms) {
 	size_t got = 0;
@@ -304,6 +308,7 @@ static void drain_stdout(int fd, char *buf, size_t cap, size_t *len,
 }
 
 int main(void) {
+	SERVER_PORT = (uint16_t)(20000 + (getpid() & 0x1fff));
 	daemon_t d = { -1, -1 };
 	EXPECT(spawn_daemon(&d, SERVER_PORT, "./examples/frame_hi") == 0);
 	if (d.pid < 0) {

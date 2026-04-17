@@ -41,7 +41,8 @@ static int failures = 0;
 #define FAIL(msg) do { fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, msg); failures++; } while (0)
 #define EXPECT(cond) do { if (!(cond)) FAIL(#cond); } while (0)
 
-static const uint16_t SERVER_PORT = 24444;
+/* Cycle 33: pid-derived port, see handshake_socket_test.c banner. */
+static uint16_t SERVER_PORT;
 static const char PAYLOAD[] = "world";
 static const char DGRAM_PAYLOAD[] = "dgram";
 
@@ -342,6 +343,7 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 }
 
 int main(void) {
+	SERVER_PORT = (uint16_t)(20000 + (getpid() & 0x1fff));
 	daemon_t d = { -1, -1 };
 	EXPECT(spawn_daemon(&d) == 0);
 	if (d.pid < 0) {
