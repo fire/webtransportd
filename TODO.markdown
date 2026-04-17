@@ -21,15 +21,16 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–22b | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–22c | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
-All work lives in one directory under ASAN+UBSAN. 11 test binaries green:
+All work lives in one directory under ASAN+UBSAN. 12 test binaries green:
 
 ```
 $ make test
   RUN    ./child_process_test
   RUN    ./env_test
   RUN    ./frame_test
+  RUN    ./handshake_echo_test
   RUN    ./handshake_socket_test
   RUN    ./handshake_test
   RUN    ./log_test
@@ -105,30 +106,31 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `flag=0 payload="hi"` frame and exits; the test asserts the
   decoded line appears. First integration of `peer_session.c` + the
   reader thread into the real server.
+- **22c** — end-to-end daemon-internal echo. `server_stream_cb` is
+  installed as the per-cnx default callback; on
+  `picoquic_callback_stream_data` it calls `wtd_frame_encode` into a
+  scratch buffer and writes the framed bytes into the child's
+  `stdin_fd`. With `--exec=/bin/cat` the full round-trip works:
+  client bytes → daemon frames → cat stdin → cat stdout → reader
+  thread decodes → work queue → loop log.
+  `handshake_echo_test` opens a bidi stream, sends `"world"` with
+  FIN, and asserts
+  `outbound frame: flag=0 len=5 payload=world` in the daemon's
+  stdout. The post-ready exit budget is bumped from 200 ms to 1 s
+  so the round trip has room; tests drain before teardown so the
+  longer window doesn't slow them.
 
 ## Next up
 
-### Cycle 22c — forward client stream bytes to child stdin
+### Cycle 22d — end-to-end echo back to the client
 
-Currently the outbound path (child → client) has all its plumbing in
-place. Inbound (client stream → child `stdin`) is still unwired.
-
-- **RED**: test sends a reliable stream message `"world"` to the
-  daemon; daemon writes `flag=0 | varint(5) | "world"` to the
-  child's `stdin`; a small helper child reads its `stdin` and
-  copies bytes back to `stdout` (essentially `/bin/cat`); the reader
-  thread decodes the echoed frame and the test sees
-  `outbound frame: payload=world` in the daemon log.
-- **GREEN**: install a per-cnx stream-data callback in
-  `picoquic_create`; on `picoquic_callback_stream_data` call
-  `wtd_frame_encode` into a scratch buffer and `write()` to
-  `child.stdin_fd`. Same pattern for datagrams later.
-
-### Cycle 22d — end-to-end echo
-
-Combine 22b + 22c: daemon sends the decoded outbound payload back on
-the same QUIC stream. Test asserts the client receives its own
-`"world"` bytes. This is the original TODO's stated v0.1 goal.
+22c closes the daemon-internal loop; 22d closes the client-visible
+loop. After decoding an outbound frame, the daemon writes the
+payload back onto the client's QUIC stream (via
+`picoquic_add_to_stream` on the stream the bytes came in on,
+retrieved from the `stream_ctx` picoquic already threads through).
+Test asserts the client receives its own `"world"` bytes on the
+same stream.
 
 ### Cycle 22e — datagrams
 

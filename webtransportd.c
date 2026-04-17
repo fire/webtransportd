@@ -16,14 +16,22 @@
  * child's stdout_fd; every complete frame the child writes lands on
  * the work queue, and the picoquic loop callback drains the queue
  * on each iteration, printing "outbound frame: <payload>" lines.
+ * Cycle 22c: server_stream_cb frames picoquic_callback_stream_data
+ * bytes and writes them into child.stdin_fd. With `--exec=/bin/cat`
+ * this completes the full daemon-internal round-trip: client bytes
+ * -> daemon frames -> child stdin -> cat echoes -> daemon reader
+ * decodes -> work queue -> loop log.
  */
 
 #include "version.h"
 
 #include "child_process.h"
+#include "frame.h"
 #include "peer_session.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
+
+#include <errno.h>
 
 #include <signal.h>
 #include <stdatomic.h>
@@ -77,6 +85,61 @@ typedef struct {
 static void on_outbound_ready(void *arg) {
 	server_ctx_t *s = (server_ctx_t *)arg;
 	atomic_fetch_add(&s->frames_pending, 1);
+}
+
+/* Write every byte in buf[0..len) to fd, retrying short writes and
+ * EINTR. Returns 0 on success, -errno on hard failure. */
+static int write_all(int fd, const uint8_t *buf, size_t len) {
+	size_t done = 0;
+	while (done < len) {
+		ssize_t n = write(fd, buf + done, len - done);
+		if (n > 0) {
+			done += (size_t)n;
+		} else if (n < 0 && errno == EINTR) {
+			continue;
+		} else {
+			return -errno;
+		}
+	}
+	return 0;
+}
+
+/* picoquic per-cnx callback. When the peer sends stream bytes, we
+ * frame them (flag=0 reliable, varint len, payload) and write the
+ * frame to the child's stdin_fd. Other events (stream_fin, close,
+ * etc.) are ignored for now — 22c is inbound-data-only. */
+static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
+		uint8_t *bytes, size_t length,
+		picoquic_call_back_event_t event,
+		void *callback_ctx, void *stream_ctx) {
+	(void)cnx;
+	(void)stream_id;
+	(void)stream_ctx;
+	server_ctx_t *ctx = (server_ctx_t *)callback_ctx;
+
+	if (event != picoquic_callback_stream_data
+			&& event != picoquic_callback_stream_fin) {
+		return 0;
+	}
+	if (length == 0 || ctx == NULL
+			|| !ctx->child_spawned || ctx->child.stdin_fd < 0) {
+		return 0;
+	}
+	uint8_t frame_buf[1 + 4 + 4096];
+	if (length > sizeof(frame_buf) - 1 - 4) {
+		/* Payload too large for the scratch buffer; drop for now.
+		 * A production path would either stream via multiple frames
+		 * or apply WT flow-control backpressure (future cycle). */
+		return 0;
+	}
+	size_t out_len = 0;
+	wtd_frame_status_t fs = wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE,
+			bytes, length, frame_buf, sizeof(frame_buf), &out_len);
+	if (fs != WTD_FRAME_OK) {
+		return 0;
+	}
+	(void)write_all(ctx->child.stdin_fd, frame_buf, out_len);
+	return 0;
 }
 
 static void drain_outbound(server_ctx_t *ctx) {
@@ -156,7 +219,11 @@ static int server_loop_cb(picoquic_quic_t *quic,
 
 	if (ctx->client_reached_ready) {
 		uint64_t now = picoquic_get_quic_time(quic);
-		if (now - ctx->ready_at_us > 200 * 1000) {
+		/* 1s budget post-ready so an inbound stream message has time
+		 * to round-trip through the child and come back on the work
+		 * queue (cycle 22c). The tests drain before waitpid, so a
+		 * generous window doesn't slow them noticeably. */
+		if (now - ctx->ready_at_us > 1000 * 1000) {
 			return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
 		}
 	}
@@ -170,22 +237,25 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
 
-	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
-	picoquic_quic_t *quic = picoquic_create(
-			8, cert, key, NULL, "hq-test",
-			NULL, NULL, NULL, NULL, reset_seed,
-			picoquic_current_time(), NULL, NULL, NULL, 0);
-	if (quic == NULL) {
-		fprintf(stderr, "webtransportd: picoquic_create failed\n");
-		return 1;
-	}
-
 	server_ctx_t sctx = { 0 };
 	sctx.exec_path = exec_path;
 	sctx.child.pid = -1;
 	sctx.child.stdin_fd = -1;
 	sctx.child.stdout_fd = -1;
 	sctx.child.stderr_fd = -1;
+
+	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
+	/* default_callback_fn + default_callback_ctx are inherited by
+	 * every new cnx picoquic accepts, so our stream_cb sees data
+	 * from any client connection. */
+	picoquic_quic_t *quic = picoquic_create(
+			8, cert, key, NULL, "hq-test",
+			server_stream_cb, &sctx, NULL, NULL, reset_seed,
+			picoquic_current_time(), NULL, NULL, NULL, 0);
+	if (quic == NULL) {
+		fprintf(stderr, "webtransportd: picoquic_create failed\n");
+		return 1;
+	}
 	picoquic_packet_loop_param_t param = { 0 };
 	param.local_af = AF_INET;
 	param.local_port = port;

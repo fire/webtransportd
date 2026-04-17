@@ -220,6 +220,14 @@ handshake_socket_test: handshake_socket_test.c webtransportd examples/frame_hi $
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
+# Cycle 22c: end-to-end daemon-internal echo. Client sends bytes on a
+# QUIC stream; daemon frames them into /bin/cat's stdin; the reader
+# thread reads cat's stdout, decodes the frame, and logs the payload.
+handshake_echo_test: handshake_echo_test.c webtransportd $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (loopback UDP echo via /bin/cat)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
