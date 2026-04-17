@@ -20,16 +20,17 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `env`           | 13-15: WEBTRANSPORT_REMOTE_ADDR → full CGI set → --passenv whitelist                                                                                |     ASAN+UBSAN     |
 |  ✅  | `child_process` | 16: fork+execvp with 3 pipes, /bin/cat round-trip, SIGTERM+reap                                                                                     |     ASAN+UBSAN     |
 |  ✅  | `peer_session`  | 17-18: mutex-guarded FIFO work queue + per-peer reader thread that decodes child stdout into frames and fires on_outbound_ready                     |     ASAN+UBSAN     |
-|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version`; 21d.1: `--selftest` exercises full mbedtls-backed `picoquic_create` + `picoquic_free` path from the daemon binary. Fork/exec smoke tests assert both (`version_test`, `selftest_test`) | ASAN+UBSAN |
+|  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version`; 21d.1: `--selftest`; 21d.3: `--server --cert= --key= --port=` runs a synchronous `picoquic_packet_loop_v3` on the main thread (no pthread — sidesteps darwin-arm64 ASAN crash), SIGTERM-driven clean shutdown via atomic flag + `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`. Fork/exec smoke tests: `version_test`, `selftest_test`, `handshake_socket_test` | ASAN+UBSAN |
 |  ✅  | `thirdparty/`   | 21a-c: full vendored build — picoquic (50) + picohttp (13) + picotls/lib (9) + cifra adapters (5) + cifra internals (24) + micro-ecc (1) + picoquic_mbedtls (2) + mbedtls/library (103) + loglib (10) all compile + link; `picoquic_create(...)` returns non-NULL under mbedtls-backed TLS | ASAN+UBSAN |
 
-Ten test binaries, all green:
+Eleven test binaries, all green:
 
 ```
 $ make test
   RUN    ./child_process_test
   RUN    ./env_test
   RUN    ./frame_test
+  RUN    ./handshake_socket_test
   RUN    ./handshake_test
   RUN    ./log_test
   RUN    ./peer_session_test
@@ -87,23 +88,28 @@ each driven by one failing test:
   sides to `picoquic_state_ready` well within the 200-iteration
   budget. Mutation-tested the client-ready assertion to prove the
   handshake is observably complete.
-- **21d.3 (real-socket handshake)**: `handshake_test` launches
-  `./webtransportd` as a subprocess with a server cert+key,
-  opens a real loopback UDP socket with its own picoquic client,
-  and asserts a WebTransport CONNECT reaches
-  `picoquic_state_ready`.
-  Blocked by the ASAN pthread issue: the function-pointer to
-  `picoquic_packet_loop_v3` gets zeroed when it routes through
-  picoquic's two-level indirection
-  (`picoquic_internal_thread_create` -> `picoquic_create_thread` ->
-  `pthread_create`) but reaches the function fine when
-  pthread_create is called directly. Reproduced with a minimal
-  standalone binary linking the full vendored objs; suspected
-  arm64 vs arm64e ABI/PAC interaction with the ASAN runtime.
-  Design workaround for this slice: skip `picoquic_start_network_thread`
-  entirely and call `picoquic_packet_loop_v3` synchronously on the
-  daemon's main thread (single-threaded loop, `should_exit` flag
-  returns `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP`).
+- ✅ **21d.3 (done)**: `handshake_socket_test` launches
+  `./webtransportd --server --cert=... --key=... --port=24443`,
+  waits for the `server ready` sentinel on the daemon's stdout,
+  binds its own loopback UDP socket, drives a picoquic client cnx
+  by pumping `picoquic_prepare_next_packet` ↔ `sendto` and
+  `recvfrom` ↔ `picoquic_incoming_packet` synchronously, and
+  asserts the client connection reaches `picoquic_state_ready`
+  within a 5s wall-clock budget. Then SIGTERM to the daemon +
+  `waitpid` for a clean exit. Mutation-tested on a deliberately
+  wrong port (the client never reaches ready and the EXPECT fires).
+
+  Design note: the daemon drives `picoquic_packet_loop_v3`
+  directly on its main thread via a locally-initialised
+  `picoquic_network_thread_ctx_t`, not via
+  `picoquic_start_network_thread` — the latter trips the
+  darwin-arm64 ASAN/pthread_create crash documented in 21d.1
+  (function pointer zeroed when routed through
+  `picoquic_internal_thread_create` -> `picoquic_create_thread`,
+  but intact when `pthread_create` is called directly). The
+  synchronous approach also simplifies SIGTERM handling (atomic
+  flag + `PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP` from the
+  loop callback).
 - **21e (bootstrap)**: `picoquic_create` with server cert+key (or
   `--cert=auto` self-signed), `picoquic_set_alpn_select_fn_v2`,
   `picowt_set_default_transport_parameters`,

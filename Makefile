@@ -199,6 +199,14 @@ handshake_test: handshake_test.c $(VENDOR_ALL_OBJS)
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
+# Cycle 21d.3: real-socket handshake. Fork/execs ./webtransportd --server
+# on a fixed loopback UDP port and drives a picoquic client against it
+# over real sendto/recvfrom, so this test needs the daemon binary built.
+handshake_socket_test: handshake_socket_test.c webtransportd $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (loopback UDP handshake)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_socket_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
