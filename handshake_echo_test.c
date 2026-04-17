@@ -37,6 +37,8 @@ int main(void) {
 #include "picoquic.h"
 #include "picoquic_utils.h"
 #include "h3zero.h"
+#include "h3zero_common.h"
+#include "pico_webtransport.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -208,41 +210,87 @@ static void kill_and_reap(daemon_t *d, int *p_status) {
 }
 
 typedef struct {
+	h3zero_callback_ctx_t *h3_ctx;
+	h3zero_stream_ctx_t *control_stream_ctx;
+	uint64_t control_stream_id;
+	int connect_accepted;
+	int dgram_sent;
 	uint8_t stream_buf[128];
 	size_t stream_len;
 	uint8_t dgram_buf[128];
 	size_t dgram_len;
 } client_ctx_t;
 
-static int client_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
-		uint8_t *bytes, size_t length,
-		picoquic_call_back_event_t event,
-		void *callback_ctx, void *stream_ctx) {
-	(void)cnx;
-	(void)stream_id;
+static int wt_client_cb(picoquic_cnx_t *cnx, uint8_t *bytes,
+		size_t length, picohttp_call_back_event_t fin_or_event,
+		h3zero_stream_ctx_t *stream_ctx, void *path_app_ctx) {
+	client_ctx_t *c = (client_ctx_t *)path_app_ctx;
 	(void)stream_ctx;
-	client_ctx_t *c = (client_ctx_t *)callback_ctx;
-	if (length == 0) {
+
+	switch (fin_or_event) {
+	case picohttp_callback_connecting:
+		c->control_stream_id = 0;
+		return 0;
+
+	case picohttp_callback_connect_accepted: {
+		c->connect_accepted = 1;
+
+		if (picowt_create_local_stream(cnx, 1, c->h3_ctx,
+				c->control_stream_id) != 0) {
+			return -1;
+		}
+
+		h3zero_stream_ctx_t *data_stream = h3zero_find_stream(c->h3_ctx,
+				stream_ctx->stream_id + 2);
+		if (data_stream != NULL) {
+			picoquic_add_to_stream(cnx, data_stream->stream_id,
+					(const uint8_t *)PAYLOAD,
+					sizeof(PAYLOAD) - 1, 0);
+		}
+
+		if (!c->dgram_sent) {
+			h3zero_set_datagram_ready(cnx, c->control_stream_id);
+			c->dgram_sent = 1;
+		}
+
 		return 0;
 	}
-	if (event == picoquic_callback_stream_data
-			|| event == picoquic_callback_stream_fin) {
-		if (c->stream_len + length <= sizeof(c->stream_buf)) {
-			memcpy(c->stream_buf + c->stream_len, bytes, length);
-			c->stream_len += length;
+
+	case picohttp_callback_post_data:
+	case picohttp_callback_post_fin:
+		if (length > 0) {
+			if (c->stream_len + length <= sizeof(c->stream_buf)) {
+				memcpy(c->stream_buf + c->stream_len, bytes,
+						length);
+				c->stream_len += length;
+			}
 		}
-	} else if (event == picoquic_callback_datagram) {
-		if (c->dgram_len + length <= sizeof(c->dgram_buf)) {
-			memcpy(c->dgram_buf + c->dgram_len, bytes, length);
-			c->dgram_len += length;
+		return 0;
+
+	case picohttp_callback_post_datagram:
+		if (length > 0) {
+			if (c->dgram_len + length <= sizeof(c->dgram_buf)) {
+				memcpy(c->dgram_buf + c->dgram_len, bytes,
+						length);
+				c->dgram_len += length;
+			}
 		}
+		return 0;
+
+	case picohttp_callback_provide_datagram: {
+		uint8_t *buf = h3zero_provide_datagram_buffer((void *)bytes,
+				sizeof(DGRAM_PAYLOAD) - 1, 0);
+		if (buf != NULL) {
+			memcpy(buf, DGRAM_PAYLOAD, sizeof(DGRAM_PAYLOAD) - 1);
+		}
+		return 0;
 	}
-	return 0;
+
+	default:
+		return 0;
+	}
 }
 
-/* Open a UDP socket, handshake a picoquic client against the daemon,
- * send PAYLOAD on stream 0 with FIN, and keep pumping until the
- * client receives PAYLOAD back or the wall-clock budget expires. */
 static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 	int sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sock < 0) {
@@ -268,31 +316,40 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 	picoquic_quic_t *quic = picoquic_create(
 			4, NULL, NULL, NULL, "h3",
-			NULL, NULL, NULL, NULL, reset_seed,
+			h3zero_callback, NULL, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		close(sock);
 		return -1;
 	}
-	/* Cycle 22e: enable datagrams on the client side too. */
+
+	picowt_set_default_transport_parameters(quic);
 	(void)picoquic_set_default_tp_value(quic,
 			picoquic_tp_max_datagram_frame_size, 1500);
-	picoquic_cnx_t *cnx = picoquic_create_client_cnx(
-			quic, (struct sockaddr *)&srv,
-			picoquic_current_time(), 0, "test.example",
-			"h3", client_stream_cb, cctx);
-	if (cnx == NULL) {
+
+	picoquic_cnx_t *cnx = NULL;
+	uint64_t now = picoquic_current_time();
+	if (picowt_prepare_client_cnx(quic, (struct sockaddr *)&srv, &cnx,
+			&cctx->h3_ctx, &cctx->control_stream_ctx, now,
+			"test.example") != 0) {
 		picoquic_free(quic);
 		close(sock);
 		return -1;
 	}
 
+	if (picowt_connect(cnx, cctx->h3_ctx, cctx->control_stream_ctx,
+			"test.example", "/wt", wt_client_cb, cctx, "") != 0) {
+		picoquic_free(quic);
+		close(sock);
+		return -1;
+	}
+
+	picoquic_start_client_cnx(cnx);
+
 	uint64_t deadline = picoquic_current_time() + 5ull * 1000 * 1000;
-	int ready = 0;
-	int sent = 0;
 	uint8_t buf[2048];
 	while (picoquic_current_time() < deadline) {
-		uint64_t now = picoquic_current_time();
+		now = picoquic_current_time();
 
 		size_t send_len = 0;
 		struct sockaddr_storage sto, sfrom;
@@ -326,37 +383,9 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 					0, 0, picoquic_current_time());
 		}
 
-		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
-			if (!ready) {
-				ready = 1;
-				/* Cycle 43: send HTTP/3 CONNECT to /wt for WebTransport */
-				uint8_t connect_frame[512];
-				uint8_t *next = h3zero_create_connect_header_frame(
-					connect_frame, connect_frame + sizeof(connect_frame),
-					"test.example", (const uint8_t *)"/wt", 3,
-					"webtransport", NULL, NULL, NULL);
-				if (next != NULL) {
-					size_t frame_len = next - connect_frame;
-					(void)picoquic_add_to_stream(cnx, 0,
-						connect_frame, frame_len, 0);
-				}
-			}
-			if (!sent && ready) {
-				/* Send payload after CONNECT frame on stream 0 */
-				(void)picoquic_add_to_stream(cnx, 0,
-						(const uint8_t *)PAYLOAD,
-						sizeof(PAYLOAD) - 1, 1);
-				/* And a datagram in the same cnx. */
-				(void)picoquic_queue_datagram_frame(cnx,
-						sizeof(DGRAM_PAYLOAD) - 1,
-						(const uint8_t *)DGRAM_PAYLOAD);
-				sent = 1;
-				deadline = now + 800ull * 1000;
-			}
-		}
 		if (cctx->stream_len >= sizeof(PAYLOAD) - 1
 				&& cctx->dgram_len >= sizeof(DGRAM_PAYLOAD) - 1) {
-			break; /* both echoes came back */
+			break;
 		}
 
 		struct timespec ts = { 0, 5 * 1000 * 1000 };
@@ -365,7 +394,7 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 
 	picoquic_free(quic);
 	close(sock);
-	int ok = ready && sent
+	int ok = cctx->connect_accepted
 			&& cctx->stream_len >= sizeof(PAYLOAD) - 1
 			&& cctx->dgram_len >= sizeof(DGRAM_PAYLOAD) - 1;
 	return ok ? 0 : -1;
@@ -387,7 +416,7 @@ int main(void) {
 		return 1;
 	}
 
-	client_ctx_t cctx = { { 0 }, 0, { 0 }, 0 };
+	client_ctx_t cctx = { NULL, NULL, 0, 0, 0, { 0 }, 0, { 0 }, 0 };
 	int cli_rc = run_client(SERVER_PORT, &cctx);
 	EXPECT(cli_rc == 0);
 	/* Cycle 22d: client must see its own "world" come back on stream. */

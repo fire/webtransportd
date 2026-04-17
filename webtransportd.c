@@ -37,14 +37,22 @@
 
 static atomic_int g_should_exit = 0;
 
+typedef struct server_ctx server_ctx_t;
+
 typedef struct wtd_peer {
 	picoquic_cnx_t *cnx;
 	wtd_child_t child;
 	wtd_peer_session_t session;
 	struct wtd_peer *next;
+	uint64_t control_stream_id;
+	uint64_t data_stream_id;
+	h3zero_callback_ctx_t *h3_ctx;
+	server_ctx_t *sctx;
+	uint8_t *pending_dgram;
+	size_t pending_dgram_len;
 } wtd_peer_t;
 
-typedef struct {
+typedef struct server_ctx {
 	const char *exec_path;
 	const char *dir_path;
 	wtd_peer_t *peers;
@@ -55,61 +63,14 @@ static void on_sigterm(int sig) {
 	atomic_store(&g_should_exit, 1);
 }
 
-static wtd_peer_t *peer_find(server_ctx_t *s, picoquic_cnx_t *cnx) {
-	for (wtd_peer_t *p = s->peers; p != NULL; p = p->next) {
-		if (p->cnx == cnx) {
-			return p;
-		}
-	}
-	return NULL;
-}
-
-static wtd_peer_t *peer_create(server_ctx_t *s, picoquic_cnx_t *cnx) {
-	wtd_peer_t *p = (wtd_peer_t *)calloc(1, sizeof(*p));
-	if (p == NULL) {
-		return NULL;
-	}
-	p->cnx = cnx;
-	p->next = s->peers;
-	s->peers = p;
-
-	if (s->exec_path != NULL) {
-		const char *const argv[] = { s->exec_path, NULL };
-		if (wtd_child_spawn(argv, NULL, &p->child) != 0) {
-			s->peers = p->next;
-			free(p);
-			return NULL;
-		}
-		wtd_peer_session_init(&p->session);
-		if (wtd_peer_session_start_reader(&p->session, p->child.stdout_fd,
-				NULL, NULL) != 0) {
-			wtd_child_terminate(&p->child);
-			s->peers = p->next;
-			free(p);
-			return NULL;
-		}
-	}
-	return p;
-}
-
-static void drain_outbound(wtd_peer_t *p, picoquic_cnx_t *cnx) {
-	(void)cnx;
-	wtd_outbound_frame_t *frame;
-	while ((frame = wtd_work_queue_drain(&p->session.outbound)) != NULL) {
-		wtd_log(WTD_LOG_TRACE,
-				"outbound frame: flag=%d len=%zu payload=%.*s",
-				frame->flag, frame->payload_len,
-				(int)frame->payload_len, frame->payload);
-		free(frame);
-	}
-}
 
 /* Packet loop callback */
 static int server_loop_cb(picoquic_quic_t *quic,
 		picoquic_packet_loop_cb_enum cb,
 		void *cb_ctx, void *cb_arg) {
+	(void)quic;
+	(void)cb_ctx;
 	(void)cb_arg;
-	server_ctx_t *ctx = (server_ctx_t *)cb_ctx;
 
 	if (cb == picoquic_packet_loop_ready) {
 		printf("server ready\n");
@@ -120,18 +81,6 @@ static int server_loop_cb(picoquic_quic_t *quic,
 
 	if (atomic_load(&g_should_exit)) {
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
-	}
-
-	picoquic_cnx_t *cnx = picoquic_get_first_cnx(quic);
-	while (cnx != NULL) {
-		wtd_peer_t *p = peer_find(ctx, cnx);
-		if (p == NULL && picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
-			p = peer_create(ctx, cnx);
-		}
-		if (p != NULL) {
-			drain_outbound(p, cnx);
-		}
-		cnx = picoquic_get_next_cnx(cnx);
 	}
 
 	return 0;
@@ -168,28 +117,21 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 
-	picohttp_server_parameters_t h3_params = { 0 };
-	h3_params.web_folder = dir_path;
-	h3zero_callback_ctx_t *h3_ctx = h3zero_callback_create_context(&h3_params);
-	if (h3_ctx == NULL) {
-		wtd_log(WTD_LOG_ERROR,
-				"webtransportd: h3zero context creation failed");
-		free(cert_der);
-		free(key_der);
-		return 1;
-	}
+	static picohttp_server_parameters_t server_param = { 0 };
+	server_param.web_folder = dir_path;
+	server_param.path_table = NULL;
+	server_param.path_table_nb = 0;
 
 	picoquic_quic_t *quic = picoquic_create(
 			8,
 			use_autocert ? NULL : cert,
 			use_autocert ? NULL : key,
 			NULL, "h3",
-			h3zero_callback, h3_ctx, NULL, NULL, reset_seed,
+			h3zero_callback, &server_param, NULL, NULL, reset_seed,
 			picoquic_current_time(), NULL, NULL, NULL, 0);
 	if (quic == NULL) {
 		wtd_log(WTD_LOG_ERROR,
 				"webtransportd: picoquic_create failed");
-		h3zero_callback_delete_context(NULL, h3_ctx);
 		free(cert_der);
 		free(key_der);
 		return 1;
@@ -208,7 +150,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 			wtd_log(WTD_LOG_ERROR,
 					"webtransportd: chain alloc failed");
 			picoquic_free(quic);
-			h3zero_callback_delete_context(NULL, h3_ctx);
 			free(cert_der);
 			free(key_der);
 			return 1;
@@ -222,7 +163,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 			wtd_log(WTD_LOG_ERROR,
 					"webtransportd: key install failed");
 			picoquic_free(quic);
-			h3zero_callback_delete_context(NULL, h3_ctx);
 			free(key_der);
 			return 1;
 		}
@@ -253,7 +193,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	}
 
 	picoquic_free(quic);
-	h3zero_callback_delete_context(NULL, h3_ctx);
 
 	if (rc == PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP || rc == 0 ||
 			atomic_load(&g_should_exit)) {
