@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–22d | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–22e | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
 All work lives in one directory under ASAN+UBSAN. 12 test binaries green:
 
@@ -113,25 +113,30 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `stdin_fd`. With `--exec=/bin/cat` the full round-trip works:
   client bytes → daemon frames → cat stdin → cat stdout → reader
   thread decodes → work queue → loop log.
-- **22d** — **client-visible echo.** `drain_outbound` now also
-  calls `picoquic_add_to_stream` on the first `(cnx, stream_id)`
-  that fired the stream-data callback, so the decoded payload goes
-  back to the client over QUIC. `handshake_echo_test` installs a
-  client-side `client_stream_cb` that accumulates received bytes;
-  after sending `"world"` with FIN, it pumps until
-  `cctx.recv_len == 5`, then `memcmp`s against `PAYLOAD`. Client
-  sees its own bytes come back — the v0.1 echo works end-to-end
-  under mbedtls-backed QUIC + ASAN+UBSAN. Mutation-tested by
-  flipping the expected payload to `"WORLD"` (the `memcmp` fires
-  without touching the handshake or length checks).
+- **22d** — **client-visible stream echo.** `drain_outbound`
+  `picoquic_add_to_stream`s decoded payloads back onto the first
+  `(cnx, stream_id)` the stream-data callback saw.
+  `handshake_echo_test` accumulates received bytes with its own
+  `client_stream_cb` and `memcmp`s against `"world"` — client sees
+  its own bytes return over mbedtls-backed QUIC + ASAN.
+- **22e** — **datagram round-trip.** Both sides set
+  `picoquic_tp_max_datagram_frame_size` via
+  `picoquic_set_default_tp_value` so datagram support negotiates.
+  `server_stream_cb` handles `picoquic_callback_datagram`: frames
+  bytes with `flag=1` and writes them to child stdin. The reader
+  thread decodes a `flag=1` frame off cat's stdout and
+  `drain_outbound` echoes via `picoquic_queue_datagram_frame`
+  instead of `picoquic_add_to_stream`. The client's callback
+  accumulates `picoquic_callback_datagram` bytes separately;
+  `handshake_echo_test` sends both `"world"` on stream 0 and
+  `"dgram"` as a datagram, then asserts both come back on their
+  respective channels. Mutation-tested on the datagram memcmp.
 
 ## Next up
 
-### Cycle 22e — datagrams
-
-Symmetry: `flag=1` frames ↔ WebTransport datagrams.
-`picoquic_queue_datagram_frame` on the daemon side; test opens an
-unreliable flow and round-trips.
+(Nothing queued for the v0.1 scope — streams + datagrams + child
+pipe all round-trip end-to-end. See "After the daemon works" and
+"Future cycles" below.)
 
 ### Cycle N — Graceful shutdown on real multi-cnx load
 

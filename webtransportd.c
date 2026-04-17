@@ -25,6 +25,11 @@
  * on the first cnx/stream that arrived, so the decoded payload
  * goes back to the client on the same QUIC stream. The round-trip
  * is now visible to the client.
+ * Cycle 22e: datagram symmetry. max_datagram_frame_size is set on
+ * the quic context so datagrams are negotiated; picoquic_callback_
+ * datagram frames bytes with flag=1 and writes them to the child;
+ * drain_outbound routes flag=1 frames to picoquic_queue_datagram_
+ * frame instead of picoquic_add_to_stream.
  */
 
 #include "version.h"
@@ -129,18 +134,27 @@ static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 	(void)stream_ctx;
 	server_ctx_t *ctx = (server_ctx_t *)callback_ctx;
 
-	if (event != picoquic_callback_stream_data
-			&& event != picoquic_callback_stream_fin) {
-		return 0;
-	}
 	if (ctx == NULL) {
 		return 0;
 	}
-	/* Remember the cnx+stream regardless of payload length so even a
-	 * lone FIN registers the echo target. */
-	ctx->active_cnx = cnx;
-	ctx->active_stream_id = stream_id;
-	ctx->stream_seen = 1;
+
+	uint8_t flag;
+	if (event == picoquic_callback_stream_data
+			|| event == picoquic_callback_stream_fin) {
+		/* Remember the cnx+stream regardless of payload length so
+		 * even a lone FIN registers the stream echo target. */
+		ctx->active_cnx = cnx;
+		ctx->active_stream_id = stream_id;
+		ctx->stream_seen = 1;
+		flag = WTD_FRAME_FLAG_RELIABLE;
+	} else if (event == picoquic_callback_datagram) {
+		/* Datagrams don't carry a stream id, but we still need a
+		 * cnx to echo back on via picoquic_queue_datagram_frame. */
+		ctx->active_cnx = cnx;
+		flag = WTD_FRAME_FLAG_UNRELIABLE;
+	} else {
+		return 0;
+	}
 
 	if (length == 0 || !ctx->child_spawned || ctx->child.stdin_fd < 0) {
 		return 0;
@@ -153,7 +167,7 @@ static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 		return 0;
 	}
 	size_t out_len = 0;
-	wtd_frame_status_t fs = wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE,
+	wtd_frame_status_t fs = wtd_frame_encode(flag,
 			bytes, length, frame_buf, sizeof(frame_buf), &out_len);
 	if (fs != WTD_FRAME_OK) {
 		return 0;
@@ -175,14 +189,22 @@ static void drain_outbound(server_ctx_t *ctx) {
 		(void)fwrite(head->payload, 1, head->payload_len, stdout);
 		printf("\n");
 		fflush(stdout);
-		/* Cycle 22d: echo the payload back to the client on the
-		 * stream it arrived on. set_fin=0 so further frames on the
-		 * same stream still work; closing is the client's job. */
-		if (ctx->stream_seen && ctx->active_cnx != NULL
-				&& head->payload_len > 0) {
-			(void)picoquic_add_to_stream(
-					ctx->active_cnx, ctx->active_stream_id,
-					head->payload, head->payload_len, 0);
+		/* Cycle 22d/22e: echo the payload back on the channel it
+		 * came in on. flag=0 -> same QUIC stream via
+		 * picoquic_add_to_stream; flag=1 -> datagram frame via
+		 * picoquic_queue_datagram_frame. set_fin=0 so further
+		 * stream payloads still work; closing is the client's job. */
+		if (ctx->active_cnx != NULL && head->payload_len > 0) {
+			if (head->flag == WTD_FRAME_FLAG_UNRELIABLE) {
+				(void)picoquic_queue_datagram_frame(
+						ctx->active_cnx,
+						head->payload_len, head->payload);
+			} else if (ctx->stream_seen) {
+				(void)picoquic_add_to_stream(
+						ctx->active_cnx,
+						ctx->active_stream_id,
+						head->payload, head->payload_len, 0);
+			}
 		}
 		free(head);
 		head = next;
@@ -285,6 +307,10 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 		fprintf(stderr, "webtransportd: picoquic_create failed\n");
 		return 1;
 	}
+	/* Cycle 22e: enable QUIC datagrams. 1500 ≈ ethernet MTU — any
+	 * non-zero value advertises support in the transport params. */
+	(void)picoquic_set_default_tp_value(quic,
+			picoquic_tp_max_datagram_frame_size, 1500);
 	picoquic_packet_loop_param_t param = { 0 };
 	param.local_af = AF_INET;
 	param.local_port = port;

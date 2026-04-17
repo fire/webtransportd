@@ -1,18 +1,14 @@
 /* TDD log:
  * - Cycle 22c: daemon-internal echo visible on daemon stdout.
- * - Cycle 22d (this commit): client-visible echo. The client
- *   installs its own picoquic callback on stream data, records
- *   bytes it receives, and asserts it gets back exactly the
- *   "world" payload it sent. This closes the full loop:
- *     client sends "world" on stream 0 ->
- *     server_stream_cb frames + writes to /bin/cat ->
- *     cat echoes framed bytes ->
- *     reader thread decodes, pushes to work queue ->
- *     drain_outbound picoquic_add_to_stream back onto the
- *       same cnx+stream ->
- *     client callback sees "world" on stream 0.
- *   The daemon-stdout sentinel from 22c is still checked so we
- *   know both halves of the loop are working.
+ * - Cycle 22d: client-visible stream echo.
+ * - Cycle 22e (this commit): datagram round-trip. Client enables
+ *   picoquic's datagram transport parameter, sends "dgram" via
+ *   picoquic_queue_datagram_frame in addition to the stream
+ *   "world", and the client callback accumulates stream bytes
+ *   and datagram bytes separately. Server-side: a flag=1 frame
+ *   on the peer_session work queue gets echoed via
+ *   picoquic_queue_datagram_frame instead of
+ *   picoquic_add_to_stream.
  */
 
 #include "picoquic.h"
@@ -38,6 +34,7 @@ static int failures = 0;
 
 static const uint16_t SERVER_PORT = 24444;
 static const char PAYLOAD[] = "world";
+static const char DGRAM_PAYLOAD[] = "dgram";
 
 typedef struct {
 	pid_t pid;
@@ -179,8 +176,10 @@ static void kill_and_reap(daemon_t *d, int *p_status) {
 }
 
 typedef struct {
-	uint8_t received[128];
-	size_t recv_len;
+	uint8_t stream_buf[128];
+	size_t stream_len;
+	uint8_t dgram_buf[128];
+	size_t dgram_len;
 } client_ctx_t;
 
 static int client_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
@@ -191,12 +190,20 @@ static int client_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 	(void)stream_id;
 	(void)stream_ctx;
 	client_ctx_t *c = (client_ctx_t *)callback_ctx;
-	if ((event == picoquic_callback_stream_data
-			|| event == picoquic_callback_stream_fin)
-			&& length > 0
-			&& c->recv_len + length <= sizeof(c->received)) {
-		memcpy(c->received + c->recv_len, bytes, length);
-		c->recv_len += length;
+	if (length == 0) {
+		return 0;
+	}
+	if (event == picoquic_callback_stream_data
+			|| event == picoquic_callback_stream_fin) {
+		if (c->stream_len + length <= sizeof(c->stream_buf)) {
+			memcpy(c->stream_buf + c->stream_len, bytes, length);
+			c->stream_len += length;
+		}
+	} else if (event == picoquic_callback_datagram) {
+		if (c->dgram_len + length <= sizeof(c->dgram_buf)) {
+			memcpy(c->dgram_buf + c->dgram_len, bytes, length);
+			c->dgram_len += length;
+		}
 	}
 	return 0;
 }
@@ -235,6 +242,9 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 		close(sock);
 		return -1;
 	}
+	/* Cycle 22e: enable datagrams on the client side too. */
+	(void)picoquic_set_default_tp_value(quic,
+			picoquic_tp_max_datagram_frame_size, 1500);
 	picoquic_cnx_t *cnx = picoquic_create_client_cnx(
 			quic, (struct sockaddr *)&srv,
 			picoquic_current_time(), 0, "test.example",
@@ -294,15 +304,20 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 				(void)picoquic_add_to_stream(cnx, 0,
 						(const uint8_t *)PAYLOAD,
 						sizeof(PAYLOAD) - 1, 1);
+				/* And a datagram in the same cnx. */
+				(void)picoquic_queue_datagram_frame(cnx,
+						sizeof(DGRAM_PAYLOAD) - 1,
+						(const uint8_t *)DGRAM_PAYLOAD);
 				sent = 1;
-				/* Keep pumping 800ms after send so the server
-				 * has time to receive, frame, pipe through cat,
-				 * decode, and write the echoed bytes back. */
+				/* Keep pumping ~800 ms after send so the server
+				 * has time to receive both, pipe through cat,
+				 * decode, and write echoes back on each channel. */
 				deadline = now + 800ull * 1000;
 			}
 		}
-		if (cctx->recv_len >= sizeof(PAYLOAD) - 1) {
-			break; /* client saw its own bytes come back */
+		if (cctx->stream_len >= sizeof(PAYLOAD) - 1
+				&& cctx->dgram_len >= sizeof(DGRAM_PAYLOAD) - 1) {
+			break; /* both echoes came back */
 		}
 
 		struct timespec ts = { 0, 5 * 1000 * 1000 };
@@ -311,7 +326,10 @@ static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 
 	picoquic_free(quic);
 	close(sock);
-	return (ready && sent) ? 0 : -1;
+	int ok = ready && sent
+			&& cctx->stream_len >= sizeof(PAYLOAD) - 1
+			&& cctx->dgram_len >= sizeof(DGRAM_PAYLOAD) - 1;
+	return ok ? 0 : -1;
 }
 
 int main(void) {
@@ -329,18 +347,24 @@ int main(void) {
 		return 1;
 	}
 
-	client_ctx_t cctx = { { 0 }, 0 };
+	client_ctx_t cctx = { { 0 }, 0, { 0 }, 0 };
 	int cli_rc = run_client(SERVER_PORT, &cctx);
 	EXPECT(cli_rc == 0);
-	/* Cycle 22d: client must see its own "world" come back. */
-	EXPECT(cctx.recv_len == sizeof(PAYLOAD) - 1);
-	EXPECT(cctx.recv_len == sizeof(PAYLOAD) - 1
-			&& memcmp(cctx.received, PAYLOAD, sizeof(PAYLOAD) - 1) == 0);
+	/* Cycle 22d: client must see its own "world" come back on stream. */
+	EXPECT(cctx.stream_len == sizeof(PAYLOAD) - 1);
+	EXPECT(cctx.stream_len == sizeof(PAYLOAD) - 1
+			&& memcmp(cctx.stream_buf, PAYLOAD, sizeof(PAYLOAD) - 1) == 0);
+	/* Cycle 22e: and "dgram" comes back on the datagram channel. */
+	EXPECT(cctx.dgram_len == sizeof(DGRAM_PAYLOAD) - 1);
+	EXPECT(cctx.dgram_len == sizeof(DGRAM_PAYLOAD) - 1
+			&& memcmp(cctx.dgram_buf, DGRAM_PAYLOAD,
+					sizeof(DGRAM_PAYLOAD) - 1) == 0);
 
 	char log[2048];
 	size_t log_len = 0;
 	drain_stdout(d.stdout_fd, log, sizeof(log), &log_len, 500);
 	EXPECT(strstr(log, "outbound frame: flag=0 len=5 payload=world") != NULL);
+	EXPECT(strstr(log, "outbound frame: flag=1 len=5 payload=dgram") != NULL);
 
 	int status = 0;
 	kill_and_reap(&d, &status);
