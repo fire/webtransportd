@@ -280,8 +280,11 @@ static void cycle8_two_frames_one_buffer(void) {
 
 static void cycle9_too_big(void) {
 	/* Encode side: refuse a payload past the cap (nothing is written, no
-	 * out_buf access — out_buf can be tiny / NULL-equivalent). */
-	uint8_t tiny[1];
+	 * out_buf access — out_buf can be tiny / NULL-equivalent). gcc's
+	 * -Wmaybe-uninitialized sees a path where tiny is read as the
+	 * payload arg and warns; zero-init keeps it happy without changing
+	 * the behaviour under test (the too-big check fires first). */
+	uint8_t tiny[1] = { 0 };
 	size_t out_len = 99;
 	wtd_frame_status_t s = wtd_frame_encode(WTD_FRAME_FLAG_RELIABLE,
 			tiny /* unused once we fail */, (size_t)WTD_FRAME_MAX_PAYLOAD + 1,
