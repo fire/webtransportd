@@ -26,9 +26,9 @@ static size_t varint_encode(uint64_t v, uint8_t *out) {
 	return 4;
 }
 
-/* Returns the number of bytes consumed (1, 2, or 4), or 0 if `avail` is
- * too small to hold the indicated varint. Caller must check `avail >= 1`
- * before calling so we can examine the prefix safely. */
+/* Returns the number of bytes consumed (1, 2, 4, or 8), or 0 if `avail`
+ * is too small to hold the indicated varint. Caller must check
+ * `avail >= 1` before calling so we can examine the prefix safely. */
 static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value) {
 	uint8_t prefix = buf[0] >> 6;
 	if (prefix == 0) {
@@ -42,15 +42,34 @@ static size_t varint_decode(const uint8_t *buf, size_t avail, uint64_t *p_value)
 		*p_value = ((uint64_t)(buf[0] & 0x3f) << 8) | buf[1];
 		return 2;
 	}
-	/* prefix == 2: 4-byte form. */
-	if (avail < 4) {
+	if (prefix == 2) {
+		/* 4-byte form: 30-bit value. */
+		if (avail < 4) {
+			return 0;
+		}
+		*p_value = ((uint64_t)(buf[0] & 0x3f) << 24)
+				| ((uint64_t)buf[1] << 16)
+				| ((uint64_t)buf[2] << 8)
+				| (uint64_t)buf[3];
+		return 4;
+	}
+	/* prefix == 3: 8-byte form, 62-bit value. Our encoder always
+	 * picks the shortest form so it never emits this, but peers
+	 * might, and the previous code silently fell into the 4-byte
+	 * branch which corrupts the decode. Accept the form here;
+	 * wtd_frame_decode still enforces WTD_FRAME_MAX_PAYLOAD above it. */
+	if (avail < 8) {
 		return 0;
 	}
-	*p_value = ((uint64_t)(buf[0] & 0x3f) << 24)
-			| ((uint64_t)buf[1] << 16)
-			| ((uint64_t)buf[2] << 8)
-			| (uint64_t)buf[3];
-	return 4;
+	*p_value = ((uint64_t)(buf[0] & 0x3f) << 56)
+			| ((uint64_t)buf[1] << 48)
+			| ((uint64_t)buf[2] << 40)
+			| ((uint64_t)buf[3] << 32)
+			| ((uint64_t)buf[4] << 24)
+			| ((uint64_t)buf[5] << 16)
+			| ((uint64_t)buf[6] << 8)
+			| (uint64_t)buf[7];
+	return 8;
 }
 
 /* How many bytes a varint of value v will occupy (1, 2, or 4). Mirrors the

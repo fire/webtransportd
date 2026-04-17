@@ -24,9 +24,15 @@
  *   and decode refuses an on-wire frame whose length-varint claims more
  *   than the cap (defends against an attacker-crafted stream that would
  *   otherwise force a huge alloc on the daemon's reader thread).
- * - Cycle 10 (this addition): encode refuses if the caller's output
+ * - Cycle 10: encode refuses if the caller's output
  *   buffer is smaller than the encoded frame would be — and does so
  *   *without* writing a single byte to that buffer (ASAN-fenced).
+ * - Cycle 25: decoder accepts the QUIC-style 8-byte varint form
+ *   (prefix 0b11). Our encoder always picks the shortest form so it
+ *   never emits prefix-3, but peers might. Two cases: a valid
+ *   8-byte varint with a small value decodes the frame cleanly; an
+ *   8-byte varint whose value exceeds WTD_FRAME_MAX_PAYLOAD is
+ *   rejected with ERR_TOO_BIG without reading past the buffer.
  */
 
 #include "frame.h"
@@ -321,6 +327,60 @@ static void cycle10_buf_too_small(void) {
 	free(out);
 }
 
+/* Build an 8-byte (prefix 0b11) varint encoding of `value` into `out`. */
+static void write_8byte_varint(uint8_t out[8], uint64_t value) {
+	out[0] = (uint8_t)(0xC0 | ((value >> 56) & 0x3f));
+	out[1] = (uint8_t)((value >> 48) & 0xff);
+	out[2] = (uint8_t)((value >> 40) & 0xff);
+	out[3] = (uint8_t)((value >> 32) & 0xff);
+	out[4] = (uint8_t)((value >> 24) & 0xff);
+	out[5] = (uint8_t)((value >> 16) & 0xff);
+	out[6] = (uint8_t)((value >> 8) & 0xff);
+	out[7] = (uint8_t)(value & 0xff);
+}
+
+static void cycle25_eight_byte_varint(void) {
+	/* Case 1: valid 8-byte varint with value=5, payload="abcde".
+	 * Frame layout: flag + 8 varint bytes + 5 payload bytes = 14 bytes. */
+	uint8_t frame[14];
+	frame[0] = WTD_FRAME_FLAG_RELIABLE;
+	write_8byte_varint(&frame[1], 5);
+	memcpy(&frame[9], "abcde", 5);
+
+	size_t consumed = 0;
+	uint8_t flag = 0xff;
+	const uint8_t *p = NULL;
+	size_t plen = 0;
+	EXPECT(wtd_frame_decode(frame, sizeof(frame),
+				&consumed, &flag, &p, &plen) == WTD_FRAME_OK);
+	EXPECT(consumed == sizeof(frame));
+	EXPECT(flag == WTD_FRAME_FLAG_RELIABLE);
+	EXPECT(plen == 5);
+	EXPECT(memcmp(p, "abcde", 5) == 0);
+
+	/* Case 2: 8-byte varint claiming a length past WTD_FRAME_MAX_PAYLOAD.
+	 * Must return ERR_TOO_BIG — never try to read that many bytes. */
+	uint8_t big_frame[9];
+	big_frame[0] = WTD_FRAME_FLAG_RELIABLE;
+	write_8byte_varint(&big_frame[1], WTD_FRAME_MAX_PAYLOAD + 1);
+	size_t c2 = 0;
+	uint8_t f2 = 0;
+	const uint8_t *p2 = NULL;
+	size_t pl2 = 0;
+	EXPECT(wtd_frame_decode(big_frame, sizeof(big_frame),
+				&c2, &f2, &p2, &pl2) == WTD_FRAME_ERR_TOO_BIG);
+
+	/* Case 3: 8-byte varint truncated mid-varint (only 5 bytes present).
+	 * Must report INCOMPLETE, not OK, not any error code. */
+	uint8_t short_frame[5] = { WTD_FRAME_FLAG_RELIABLE, 0xC0, 0, 0, 0 };
+	size_t c3 = 0;
+	uint8_t f3 = 0;
+	const uint8_t *p3 = NULL;
+	size_t pl3 = 0;
+	EXPECT(wtd_frame_decode(short_frame, sizeof(short_frame),
+				&c3, &f3, &p3, &pl3) == WTD_FRAME_INCOMPLETE);
+}
+
 int main(void) {
 	cycle1_encode_hi();
 	cycle2_decode_roundtrip();
@@ -332,5 +392,6 @@ int main(void) {
 	cycle8_two_frames_one_buffer();
 	cycle9_too_big();
 	cycle10_buf_too_small();
+	cycle25_eight_byte_varint();
 	return failures == 0 ? 0 : 1;
 }

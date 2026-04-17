@@ -15,7 +15,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 
 | Module          | Cycles | Subject                                                              |
 | --------------- | :----: | -------------------------------------------------------------------- |
-| `frame`         | 1–11, 24 | Length-prefixed codec: flag + 1/2/4-byte varint + payload; fuzz harness |
+| `frame`         | 1–11, 24–25 | Length-prefixed codec: flag + 1/2/4/8-byte varint decode + payload; fuzz harness |
 | `log`           | 12     | Level filter, thread-safe stderr emit                                |
 | `env`           | 13–15  | `WEBTRANSPORT_*` CGI set + `--passenv` whitelist                     |
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
@@ -152,6 +152,21 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `buf_len < total` bounds check — the C-level assertions fire
   immediately (and ASAN would have caught an actual OOB on
   production-sized buffers).
+- **25** — **QUIC 8-byte varint decode.** `varint_decode`
+  previously silently routed prefix-3 inputs through the 4-byte
+  branch (mask 0x3f ignored the high bits), corrupting consumed
+  and payload-start. Our encoder never emits prefix-3, so no
+  in-tree damage, but any peer that sends one would have
+  de-synced the stream. Now decode handles the full
+  `prefix ∈ {0,1,2,3}` range: 1 / 2 / 4 / 8 byte forms, with
+  `WTD_FRAME_MAX_PAYLOAD` still bounding the length above. New
+  frame_test cases cover a valid prefix-3 roundtrip, an
+  oversized prefix-3 rejected as `ERR_TOO_BIG`, and a truncated
+  prefix-3 returning `INCOMPLETE`. fuzz_test's random coverage
+  keeps 1/4 of inputs on this path so a regression would surface
+  there too. Encoder still always picks the shortest form —
+  extending it to emit 8-byte when `WTD_FRAME_MAX_PAYLOAD` rises
+  above 2^30 is a future cycle.
 
 ## Next up
 
@@ -226,8 +241,9 @@ loop with one exit path.
 - `--cert=auto` persistence — generated cert+key survive restart.
 - Per-peer flow control: apply WT stream backpressure when the
   child's stdin pipe fills, instead of dropping unreliable frames.
-- 8-byte varint support + configurable `WTD_FRAME_MAX_PAYLOAD` so
-  large reliable payloads don't force session close.
+- 8-byte varint *encode* + configurable `WTD_FRAME_MAX_PAYLOAD`
+  above 2^30 so large reliable payloads don't force session close
+  (cycle 25 added the decode side).
 - Real `child_process_win.c` (today's impl is POSIX-only).
 - `--dir` / `--staticdir` — serve static files on non-WT paths for
   devconsole, mirroring websocketd's `http.go`.
