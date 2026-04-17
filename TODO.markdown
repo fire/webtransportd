@@ -23,13 +23,14 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 |  ✅  | `webtransportd` | 19-20: `main()` + argv parsing + `--version`; 21d.1: `--selftest` exercises full mbedtls-backed `picoquic_create` + `picoquic_free` path from the daemon binary. Fork/exec smoke tests assert both (`version_test`, `selftest_test`) | ASAN+UBSAN |
 |  ✅  | `thirdparty/`   | 21a-c: full vendored build — picoquic (50) + picohttp (13) + picotls/lib (9) + cifra adapters (5) + cifra internals (24) + micro-ecc (1) + picoquic_mbedtls (2) + mbedtls/library (103) + loglib (10) all compile + link; `picoquic_create(...)` returns non-NULL under mbedtls-backed TLS | ASAN+UBSAN |
 
-Nine test binaries, all green:
+Ten test binaries, all green:
 
 ```
 $ make test
   RUN    ./child_process_test
   RUN    ./env_test
   RUN    ./frame_test
+  RUN    ./handshake_test
   RUN    ./log_test
   RUN    ./peer_session_test
   RUN    ./picoquic_create_test
@@ -77,12 +78,15 @@ each driven by one failing test:
   (`picoquic_start_network_thread`) currently trips an ASAN
   thread-start crash (pc=0) on darwin-arm64; investigation deferred
   to a focused cycle because 21d.2 doesn't need the pthread path.
-- **21d.2 (sim handshake)**: in-process client+server picoquic
-  contexts driven synchronously with `picoquic_prepare_next_packet`
-  / `picoquic_incoming_packet` (or `sim_link.c` helpers). RED: run
-  the pump until the server context reaches
-  `picoquic_state_server_ready`, assert non-zero timeout. No sockets,
-  no threads.
+- ✅ **21d.2 (done)**: `handshake_test` creates two in-process
+  `picoquic_quic_t` contexts sharing a simulated clock (server
+  loads `thirdparty/picoquic/certs/{cert,key}.pem`, both set
+  default ALPN `"hq-test"`). `picoquic_create_client_cnx` +
+  synchronous packet pumping via `picoquic_prepare_next_packet` ↔
+  `picoquic_incoming_packet` (no sockets, no pthread) drives both
+  sides to `picoquic_state_ready` well within the 200-iteration
+  budget. Mutation-tested the client-ready assertion to prove the
+  handshake is observably complete.
 - **21d.3 (real-socket handshake)**: `handshake_test` launches
   `./webtransportd` as a subprocess with a server cert+key,
   opens a real loopback UDP socket with its own picoquic client,

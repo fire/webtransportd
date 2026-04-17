@@ -191,6 +191,14 @@ picoquic_create_test: picoquic_create_test.c $(VENDOR_ALL_OBJS)
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ picoquic_create_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
+# Cycle 21d.2: in-process client+server handshake pumped synchronously.
+# Reads thirdparty/picoquic/certs/{cert,key}.pem at runtime, so `make test`
+# must run from the project root (it does).
+handshake_test: handshake_test.c $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (full vendored link)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)
