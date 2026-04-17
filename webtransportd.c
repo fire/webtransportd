@@ -21,6 +21,10 @@
  * this completes the full daemon-internal round-trip: client bytes
  * -> daemon frames -> child stdin -> cat echoes -> daemon reader
  * decodes -> work queue -> loop log.
+ * Cycle 22d: drain_outbound now also calls picoquic_add_to_stream
+ * on the first cnx/stream that arrived, so the decoded payload
+ * goes back to the client on the same QUIC stream. The round-trip
+ * is now visible to the client.
  */
 
 #include "version.h"
@@ -80,6 +84,14 @@ typedef struct {
 	int peer_initialised;
 	int reader_started;
 	atomic_int frames_pending;
+	/* Cycle 22d: the (cnx, stream_id) pair the current payload came
+	 * in on. Set by server_stream_cb, consumed by drain_outbound to
+	 * echo decoded frames back. Supports one active stream for now
+	 * (one client, one bidi stream); a future cycle replaces this
+	 * with a per-stream peer_session_t map. */
+	picoquic_cnx_t *active_cnx;
+	uint64_t active_stream_id;
+	int stream_seen;
 } server_ctx_t;
 
 static void on_outbound_ready(void *arg) {
@@ -121,8 +133,16 @@ static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 			&& event != picoquic_callback_stream_fin) {
 		return 0;
 	}
-	if (length == 0 || ctx == NULL
-			|| !ctx->child_spawned || ctx->child.stdin_fd < 0) {
+	if (ctx == NULL) {
+		return 0;
+	}
+	/* Remember the cnx+stream regardless of payload length so even a
+	 * lone FIN registers the echo target. */
+	ctx->active_cnx = cnx;
+	ctx->active_stream_id = stream_id;
+	ctx->stream_seen = 1;
+
+	if (length == 0 || !ctx->child_spawned || ctx->child.stdin_fd < 0) {
 		return 0;
 	}
 	uint8_t frame_buf[1 + 4 + 4096];
@@ -155,6 +175,15 @@ static void drain_outbound(server_ctx_t *ctx) {
 		(void)fwrite(head->payload, 1, head->payload_len, stdout);
 		printf("\n");
 		fflush(stdout);
+		/* Cycle 22d: echo the payload back to the client on the
+		 * stream it arrived on. set_fin=0 so further frames on the
+		 * same stream still work; closing is the client's job. */
+		if (ctx->stream_seen && ctx->active_cnx != NULL
+				&& head->payload_len > 0) {
+			(void)picoquic_add_to_stream(
+					ctx->active_cnx, ctx->active_stream_id,
+					head->payload, head->payload_len, 0);
+		}
 		free(head);
 		head = next;
 	}

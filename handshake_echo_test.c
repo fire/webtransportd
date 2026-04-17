@@ -1,20 +1,18 @@
 /* TDD log:
- * - Cycle 22c (this file): end-to-end daemon-internal echo.
- *   Launches ./webtransportd --server --exec=/bin/cat, runs a real
- *   loopback-UDP picoquic client, opens bidi stream 0, sends the
- *   bytes "world" with FIN, then keeps pumping so the daemon can:
- *     1. receive the stream data via server_stream_cb,
- *     2. wtd_frame_encode it (flag=0, varint(5), "world"),
- *     3. write the frame to /bin/cat's stdin,
- *     4. read the same frame bytes back off cat's stdout via the
- *        peer_session reader thread,
- *     5. decode it into the outbound work queue,
- *     6. print "outbound frame: ... payload=world" on daemon stdout.
- *   The test asserts that sentinel appears. This proves the entire
- *   daemon-internal round trip: picoquic callback -> frame_encode
- *   -> pipe write -> cat -> pipe read -> reader thread ->
- *   frame_decode -> work queue -> loop callback. No client-side
- *   receive yet — that is 22d.
+ * - Cycle 22c: daemon-internal echo visible on daemon stdout.
+ * - Cycle 22d (this commit): client-visible echo. The client
+ *   installs its own picoquic callback on stream data, records
+ *   bytes it receives, and asserts it gets back exactly the
+ *   "world" payload it sent. This closes the full loop:
+ *     client sends "world" on stream 0 ->
+ *     server_stream_cb frames + writes to /bin/cat ->
+ *     cat echoes framed bytes ->
+ *     reader thread decodes, pushes to work queue ->
+ *     drain_outbound picoquic_add_to_stream back onto the
+ *       same cnx+stream ->
+ *     client callback sees "world" on stream 0.
+ *   The daemon-stdout sentinel from 22c is still checked so we
+ *   know both halves of the loop are working.
  */
 
 #include "picoquic.h"
@@ -180,10 +178,33 @@ static void kill_and_reap(daemon_t *d, int *p_status) {
 	}
 }
 
+typedef struct {
+	uint8_t received[128];
+	size_t recv_len;
+} client_ctx_t;
+
+static int client_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
+		uint8_t *bytes, size_t length,
+		picoquic_call_back_event_t event,
+		void *callback_ctx, void *stream_ctx) {
+	(void)cnx;
+	(void)stream_id;
+	(void)stream_ctx;
+	client_ctx_t *c = (client_ctx_t *)callback_ctx;
+	if ((event == picoquic_callback_stream_data
+			|| event == picoquic_callback_stream_fin)
+			&& length > 0
+			&& c->recv_len + length <= sizeof(c->received)) {
+		memcpy(c->received + c->recv_len, bytes, length);
+		c->recv_len += length;
+	}
+	return 0;
+}
+
 /* Open a UDP socket, handshake a picoquic client against the daemon,
- * send PAYLOAD on stream 0 with FIN, and keep pumping for a short
- * while so the server has time to complete the round-trip. */
-static int run_client(uint16_t server_port) {
+ * send PAYLOAD on stream 0 with FIN, and keep pumping until the
+ * client receives PAYLOAD back or the wall-clock budget expires. */
+static int run_client(uint16_t server_port, client_ctx_t *cctx) {
 	int sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sock < 0) {
 		return -1;
@@ -217,7 +238,7 @@ static int run_client(uint16_t server_port) {
 	picoquic_cnx_t *cnx = picoquic_create_client_cnx(
 			quic, (struct sockaddr *)&srv,
 			picoquic_current_time(), 0, "test.example",
-			"hq-test", NULL, NULL);
+			"hq-test", client_stream_cb, cctx);
 	if (cnx == NULL) {
 		picoquic_free(quic);
 		close(sock);
@@ -274,11 +295,14 @@ static int run_client(uint16_t server_port) {
 						(const uint8_t *)PAYLOAD,
 						sizeof(PAYLOAD) - 1, 1);
 				sent = 1;
-				/* Keep pumping 500ms after send so the server
+				/* Keep pumping 800ms after send so the server
 				 * has time to receive, frame, pipe through cat,
-				 * decode, and log the outbound frame. */
-				deadline = now + 500ull * 1000;
+				 * decode, and write the echoed bytes back. */
+				deadline = now + 800ull * 1000;
 			}
+		}
+		if (cctx->recv_len >= sizeof(PAYLOAD) - 1) {
+			break; /* client saw its own bytes come back */
 		}
 
 		struct timespec ts = { 0, 5 * 1000 * 1000 };
@@ -305,12 +329,17 @@ int main(void) {
 		return 1;
 	}
 
-	int cli_rc = run_client(SERVER_PORT);
+	client_ctx_t cctx = { { 0 }, 0 };
+	int cli_rc = run_client(SERVER_PORT, &cctx);
 	EXPECT(cli_rc == 0);
+	/* Cycle 22d: client must see its own "world" come back. */
+	EXPECT(cctx.recv_len == sizeof(PAYLOAD) - 1);
+	EXPECT(cctx.recv_len == sizeof(PAYLOAD) - 1
+			&& memcmp(cctx.received, PAYLOAD, sizeof(PAYLOAD) - 1) == 0);
 
 	char log[2048];
 	size_t log_len = 0;
-	drain_stdout(d.stdout_fd, log, sizeof(log), &log_len, 800);
+	drain_stdout(d.stdout_fd, log, sizeof(log), &log_len, 500);
 	EXPECT(strstr(log, "outbound frame: flag=0 len=5 payload=world") != NULL);
 
 	int status = 0;

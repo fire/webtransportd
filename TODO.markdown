@@ -21,7 +21,7 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–22c | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
+| `webtransportd` | 19–22d | `--version`, `--selftest`, `--server` (synchronous loop), `--exec`   |
 
 All work lives in one directory under ASAN+UBSAN. 12 test binaries green:
 
@@ -113,29 +113,25 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `stdin_fd`. With `--exec=/bin/cat` the full round-trip works:
   client bytes → daemon frames → cat stdin → cat stdout → reader
   thread decodes → work queue → loop log.
-  `handshake_echo_test` opens a bidi stream, sends `"world"` with
-  FIN, and asserts
-  `outbound frame: flag=0 len=5 payload=world` in the daemon's
-  stdout. The post-ready exit budget is bumped from 200 ms to 1 s
-  so the round trip has room; tests drain before teardown so the
-  longer window doesn't slow them.
+- **22d** — **client-visible echo.** `drain_outbound` now also
+  calls `picoquic_add_to_stream` on the first `(cnx, stream_id)`
+  that fired the stream-data callback, so the decoded payload goes
+  back to the client over QUIC. `handshake_echo_test` installs a
+  client-side `client_stream_cb` that accumulates received bytes;
+  after sending `"world"` with FIN, it pumps until
+  `cctx.recv_len == 5`, then `memcmp`s against `PAYLOAD`. Client
+  sees its own bytes come back — the v0.1 echo works end-to-end
+  under mbedtls-backed QUIC + ASAN+UBSAN. Mutation-tested by
+  flipping the expected payload to `"WORLD"` (the `memcmp` fires
+  without touching the handshake or length checks).
 
 ## Next up
 
-### Cycle 22d — end-to-end echo back to the client
-
-22c closes the daemon-internal loop; 22d closes the client-visible
-loop. After decoding an outbound frame, the daemon writes the
-payload back onto the client's QUIC stream (via
-`picoquic_add_to_stream` on the stream the bytes came in on,
-retrieved from the `stream_ctx` picoquic already threads through).
-Test asserts the client receives its own `"world"` bytes on the
-same stream.
-
 ### Cycle 22e — datagrams
 
-Symmetry: flag=1 frames ↔ WebTransport datagrams. `picoquic_queue_datagram_frame`
-on the daemon side; test opens an unreliable flow and round-trips.
+Symmetry: `flag=1` frames ↔ WebTransport datagrams.
+`picoquic_queue_datagram_frame` on the daemon side; test opens an
+unreliable flow and round-trips.
 
 ### Cycle N — Graceful shutdown on real multi-cnx load
 
