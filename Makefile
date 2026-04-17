@@ -462,7 +462,7 @@ handshake_http3_test: handshake_http3_test.c $(VENDOR_ALL_OBJS)
 test: $(TESTS_BIN)
 	@for t in $(TESTS_BIN); do \
 		echo "  RUN    ./$$t"; \
-		./$$t || exit 1; \
+		LSAN_OPTIONS=suppressions=.asanignore:leak_check_at_exit=1 ./$$t || exit 1; \
 	done
 	@echo "  OK     all tests passed"
 

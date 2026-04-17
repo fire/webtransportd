@@ -337,8 +337,8 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 
 	default:
 		wtd_log(WTD_LOG_TRACE,
-				"[Placeholder] unhandled callback event: %d",
-				(int)event);
+				"unhandled callback event: %s",
+				picohttp_event_name(event));
 		break;
 	}
 
@@ -492,7 +492,32 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 }
 
 static int cmd_selftest(void) {
-	wtd_log(WTD_LOG_INFO, "selftest not implemented");
+	uint8_t buf[256];
+	const char *payload = "test";
+	size_t payload_len = strlen(payload);
+	size_t out_len = 0;
+
+	/* Test encode: reliable frame with payload */
+	wtd_frame_status_t encode_rc = wtd_frame_encode(0,
+			(const uint8_t *)payload, payload_len,
+			buf, sizeof(buf), &out_len);
+	if (encode_rc != WTD_FRAME_OK || out_len == 0) {
+		return 1;
+	}
+
+	/* Test decode: should recover payload */
+	uint8_t flag = 0;
+	size_t consumed = 0;
+	const uint8_t *decoded = NULL;
+	size_t decoded_len = 0;
+	wtd_frame_status_t decode_rc = wtd_frame_decode(buf, out_len,
+			&consumed, &flag, &decoded, &decoded_len);
+	if (decode_rc != WTD_FRAME_OK || decoded_len != payload_len ||
+			decoded == NULL || memcmp(decoded, payload, payload_len) != 0) {
+		return 1;
+	}
+
+	printf("selftest ok\n");
 	return 0;
 }
 
@@ -500,11 +525,13 @@ static int print_usage(FILE *out) {
 	fprintf(out, "webtransportd: HTTP/3 WebTransport daemon\n");
 	fprintf(out, "usage:\n");
 	fprintf(out, "  --version          Print version and exit\n");
+	fprintf(out, "  --selftest         Run self-tests\n");
 	fprintf(out, "  --server --cert=<pem> --key=<pem> --port=<N>\n");
 	fprintf(out, "                      Start server\n");
 	fprintf(out, "    --exec=<bin>      Spawn bin on connection\n");
 	fprintf(out, "    --dir=<path>      Serve static files\n");
 	fprintf(out, "    --log-level=<0-4> Set logging level\n");
+	fprintf(out, "\nframing: WebTransport frames encode flag, varint length, payload\n");
 	return 0;
 }
 
