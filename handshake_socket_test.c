@@ -1,17 +1,19 @@
 /* TDD log:
- * - Cycle 21d.3 (this file): real-socket WebTransport-style QUIC
- *   handshake. fork/exec ./webtransportd --server with the vendored
- *   test cert+key on a fixed loopback UDP port; read the "server
- *   ready" sentinel from the daemon's stdout; open our own UDP
- *   socket, drive a picoquic client against 127.0.0.1:<port> by
- *   pumping packets through sendto/recvfrom synchronously; assert
- *   the client connection reaches picoquic_state_ready before the
- *   wall-clock budget expires, then SIGTERM the daemon and
- *   waitpid for a clean exit.
+ * - Cycle 21d.3: real-socket QUIC handshake. fork/exec ./webtransportd
+ *   --server with the vendored test cert+key on a fixed loopback UDP
+ *   port; drive a picoquic client through sendto/recvfrom until the
+ *   connection reaches picoquic_state_ready; then SIGTERM + waitpid.
  *
- *   Deliberately uses the synchronous single-thread packet loop on
- *   the daemon (cycle 21d.3 design note — bypasses the darwin-arm64
- *   ASAN/pthread_create crash on picoquic_start_network_thread).
+ *   Deliberately uses the daemon's synchronous single-thread packet
+ *   loop to bypass the darwin-arm64 ASAN/pthread_create crash
+ *   documented in 21d.1.
+ *
+ * - Cycle 22a (this commit): same test also passes --exec=/bin/cat
+ *   and asserts the daemon prints "child spawned pid=<N>" after the
+ *   first connection reaches ready. Proves child_process.c is wired
+ *   into the real server pipeline, spawned on demand, and reaped
+ *   cleanly when the daemon tears down (ASAN+UBSAN would flag any
+ *   leaked fd/pid).
  */
 
 #include "picoquic.h"
@@ -76,7 +78,7 @@ typedef struct {
 	int stdout_fd;
 } daemon_t;
 
-static int spawn_daemon(daemon_t *out, uint16_t port) {
+static int spawn_daemon(daemon_t *out, uint16_t port, const char *exec_path) {
 	int fds[2] = { -1, -1 };
 	if (pipe(fds) != 0) {
 		return -1;
@@ -92,15 +94,21 @@ static int spawn_daemon(daemon_t *out, uint16_t port) {
 		close(fds[0]);
 		close(fds[1]);
 		char port_buf[32];
+		char exec_buf[256];
 		snprintf(port_buf, sizeof(port_buf), "--port=%u", (unsigned)port);
-		char *const argv[] = {
-			(char *)"./webtransportd",
-			(char *)"--server",
-			(char *)"--cert=thirdparty/picoquic/certs/cert.pem",
-			(char *)"--key=thirdparty/picoquic/certs/key.pem",
-			port_buf,
-			NULL,
-		};
+		snprintf(exec_buf, sizeof(exec_buf), "--exec=%s",
+				exec_path != NULL ? exec_path : "");
+		char *argv[8];
+		int i = 0;
+		argv[i++] = (char *)"./webtransportd";
+		argv[i++] = (char *)"--server";
+		argv[i++] = (char *)"--cert=thirdparty/picoquic/certs/cert.pem";
+		argv[i++] = (char *)"--key=thirdparty/picoquic/certs/key.pem";
+		argv[i++] = port_buf;
+		if (exec_path != NULL) {
+			argv[i++] = exec_buf;
+		}
+		argv[i] = NULL;
 		execvp(argv[0], argv);
 		_exit(127);
 	}
@@ -246,9 +254,37 @@ static int run_handshake(uint16_t server_port) {
 	return ready ? 0 : -1;
 }
 
+/* Drain anything the daemon has printed (appends to `buf`, up to cap),
+ * until the timeout elapses with no further data. Non-blocking read
+ * loop so we exit promptly once the daemon goes quiet. */
+static void drain_stdout(int fd, char *buf, size_t cap, size_t *len,
+		int quiet_ms) {
+	int quiet = 0;
+	while (quiet < quiet_ms && *len + 1 < cap) {
+		struct timeval tv = { 0, 20 * 1000 };
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(fd, &rfds);
+		int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+		if (sel > 0) {
+			ssize_t n = read(fd, buf + *len, cap - 1 - *len);
+			if (n > 0) {
+				*len += (size_t)n;
+				quiet = 0;
+				continue;
+			}
+			if (n == 0) {
+				break;
+			}
+		}
+		quiet += 20;
+	}
+	buf[*len] = '\0';
+}
+
 int main(void) {
 	daemon_t d = { -1, -1 };
-	EXPECT(spawn_daemon(&d, SERVER_PORT) == 0);
+	EXPECT(spawn_daemon(&d, SERVER_PORT, "/bin/cat") == 0);
 	if (d.pid < 0) {
 		return 1;
 	}
@@ -263,6 +299,15 @@ int main(void) {
 
 	int hs = run_handshake(SERVER_PORT);
 	EXPECT(hs == 0);
+
+	/* After handshake, daemon prints "client reached ready" and
+	 * "child spawned pid=<N>" on its stdout (once) and then exits
+	 * on its own ~200ms later. Drain until it goes quiet. */
+	char log[1024];
+	size_t log_len = 0;
+	drain_stdout(d.stdout_fd, log, sizeof(log), &log_len, 500);
+	EXPECT(strstr(log, "client reached ready") != NULL);
+	EXPECT(strstr(log, "child spawned pid=") != NULL);
 
 	int status = 0;
 	kill_and_reap(&d, &status);

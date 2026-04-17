@@ -8,10 +8,15 @@
  * darwin-arm64 ASAN/pthread_create crash documented in 21d.1). A
  * SIGTERM handler flips an atomic `should_exit` flag that the loop
  * callback checks to return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP.
+ * Cycle 22a: --exec=BIN spawns the configured child the first time
+ * a connection reaches ready state; the child is reaped when the
+ * daemon tears down. Proves child_process.c works from inside the
+ * real server pipeline (not just a unit test harness).
  */
 
 #include "version.h"
 
+#include "child_process.h"
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
 
@@ -34,7 +39,7 @@ static int print_usage(FILE *out) {
 	fprintf(out,
 			"usage: webtransportd --version\n"
 			"       webtransportd --selftest\n"
-			"       webtransportd --server --cert=<pem> --key=<pem> --port=<N>\n");
+			"       webtransportd --server --cert=<pem> --key=<pem> --port=<N> [--exec=<bin>]\n");
 	return 0;
 }
 
@@ -55,6 +60,9 @@ static int cmd_selftest(void) {
 typedef struct {
 	int client_reached_ready;
 	uint64_t ready_at_us;
+	const char *exec_path;
+	wtd_child_t child;
+	int child_spawned;
 } server_ctx_t;
 
 static int server_loop_cb(picoquic_quic_t *quic,
@@ -81,6 +89,20 @@ static int server_loop_cb(picoquic_quic_t *quic,
 				ctx->ready_at_us = picoquic_get_quic_time(quic);
 				printf("client reached ready\n");
 				fflush(stdout);
+				if (ctx->exec_path != NULL && !ctx->child_spawned) {
+					const char *argv[] = { ctx->exec_path, NULL };
+					int rc = wtd_child_spawn(argv, NULL, &ctx->child);
+					if (rc == 0) {
+						ctx->child_spawned = 1;
+						printf("child spawned pid=%ld\n",
+								(long)ctx->child.pid);
+						fflush(stdout);
+					} else {
+						fprintf(stderr,
+								"webtransportd: child_spawn(%s) rc=%d\n",
+								ctx->exec_path, rc);
+					}
+				}
 			}
 			break;
 		}
@@ -95,7 +117,8 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	return 0;
 }
 
-static int cmd_server(const char *cert, const char *key, uint16_t port) {
+static int cmd_server(const char *cert, const char *key, uint16_t port,
+		const char *exec_path) {
 	struct sigaction sa = { 0 };
 	sa.sa_handler = on_sigterm;
 	sigaction(SIGTERM, &sa, NULL);
@@ -112,6 +135,11 @@ static int cmd_server(const char *cert, const char *key, uint16_t port) {
 	}
 
 	server_ctx_t sctx = { 0 };
+	sctx.exec_path = exec_path;
+	sctx.child.pid = -1;
+	sctx.child.stdin_fd = -1;
+	sctx.child.stdout_fd = -1;
+	sctx.child.stderr_fd = -1;
 	picoquic_packet_loop_param_t param = { 0 };
 	param.local_af = AF_INET;
 	param.local_port = port;
@@ -124,6 +152,9 @@ static int cmd_server(const char *cert, const char *key, uint16_t port) {
 
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
+	if (sctx.child_spawned) {
+		wtd_child_terminate(&sctx.child);
+	}
 	picoquic_free(quic);
 
 	/* SIGTERM interrupts the loop's recvmsg/poll with EINTR, which the
@@ -152,6 +183,7 @@ int main(int argc, char **argv) {
 	const char *cert = NULL;
 	const char *key = NULL;
 	const char *port_str = NULL;
+	const char *exec_path = NULL;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--version") == 0) {
@@ -178,6 +210,9 @@ int main(int argc, char **argv) {
 		if (parse_arg_value(argv[i], "--port=", &port_str)) {
 			continue;
 		}
+		if (parse_arg_value(argv[i], "--exec=", &exec_path)) {
+			continue;
+		}
 		fprintf(stderr, "webtransportd: unknown argument: %s\n", argv[i]);
 		(void)print_usage(stderr);
 		return 2;
@@ -194,7 +229,7 @@ int main(int argc, char **argv) {
 			fprintf(stderr, "webtransportd: bad --port=%s\n", port_str);
 			return 2;
 		}
-		return cmd_server(cert, key, (uint16_t)port);
+		return cmd_server(cert, key, (uint16_t)port, exec_path);
 	}
 
 	(void)print_usage(stderr);

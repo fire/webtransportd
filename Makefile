@@ -29,14 +29,15 @@ peer_session_test: peer_session_test.c peer_session.c peer_session.h frame.c fra
 	@echo "  CC     $@ (peer_session.c + frame.c + $<)"
 	$(CC) $(CFLAGS) -o $@ peer_session.c frame.c $< $(LDFLAGS)
 
-# Cycle 19-20: webtransportd binary. Cycle 21d.1 adds --selftest which
-# drives picoquic_start_network_thread, so the daemon now links the
-# full vendored object set. The -isystem keeps -Werror quiet on
+# Cycle 19-20: webtransportd binary. 21d.1 links the full vendored
+# object set for picoquic_create/--selftest; 22a adds child_process.c
+# for the --exec=BIN spawn path. The -isystem keeps -Werror quiet on
 # picoquic.h / picoquic_packet_loop.h.
-webtransportd: webtransportd.c version.h $(VENDOR_ALL_OBJS)
-	@echo "  CC     $@ (full vendored link)"
+webtransportd: webtransportd.c version.h child_process.c child_process.h $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (full vendored link + child_process)"
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
-		-o $@ webtransportd.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+		-o $@ webtransportd.c child_process.c \
+		$(VENDOR_ALL_OBJS) $(LDFLAGS)
 
 # version_test fork/execs ./webtransportd, so it needs that binary built
 # first. The test compiles standalone (no matching version.c).
