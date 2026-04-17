@@ -277,8 +277,8 @@ useful slices, rough order of leverage-per-effort:
 - **Makefile.win** + **sources.mk** so POSIX `make` and Windows
   `nmake` share one source list.
 - **Docs**: top-level `README.md` (usage, framing spec, CLI flags,
-  relationship to Godot), `LICENSE` (BSD-2 for our code; upstream
-  libs keep their own licenses under `thirdparty/*/LICENSE*`),
+  relationship to Godot); ✅ `LICENSE` shipped in cycle 31
+  (BSD-2 for our code, vendored libs keep their upstream terms);
   `AUTHORS`, `CHANGES`.
 - **Examples**: `examples/echo.c` (smallest compliant child),
   `examples/echo.sh` + `examples/frame-helper.sh` (shell-friendly
