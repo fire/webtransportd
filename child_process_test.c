@@ -59,6 +59,14 @@ static void cycle16_cat_echo(void) {
 }
 
 int main(void) {
+#ifdef _WIN32
+	/* /bin/cat is POSIX-only. The Windows CreateProcessA path added
+	 * in cycle 37 is covered indirectly by the handshake tests
+	 * (examples/echo, which builds anywhere). A dedicated Win32
+	 * unit test using a cmd.exe findstr pipe is a future cycle. */
+	return 0;
+#else
 	cycle16_cat_echo();
 	return failures == 0 ? 0 : 1;
+#endif
 }

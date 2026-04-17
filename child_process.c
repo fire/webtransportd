@@ -1,12 +1,205 @@
 /*
  * webtransportd — child_process.c
  *
- * fork()/execvp() with three pipes, plus tear-down. POSIX-only.
+ * Two implementations of wtd_child_spawn / wtd_child_terminate,
+ * picked by #ifdef _WIN32. Both satisfy the same contract:
+ *
+ *   * three anonymous pipes wired to the child's stdio
+ *   * parent-side fds that behave like POSIX fds (read/write/close)
+ *   * best-effort graceful exit (SIGTERM / TerminateProcess) with
+ *     a short grace period, then forced kill / reap
+ *
+ * The POSIX path is the original cycle-16 code. The Win32 path
+ * (cycle 37) uses CreateProcessA + CreatePipe and wraps the pipe
+ * HANDLEs as CRT fds via _open_osfhandle, so the daemon's existing
+ * read/write/close calls work unchanged on both platforms.
  */
 
 #include "child_process.h"
 
 #include <errno.h>
+
+#ifdef _WIN32
+/* ===================== Win32 implementation ===================== */
+
+#include <io.h>       /* _open_osfhandle, _close */
+#include <fcntl.h>    /* _O_RDONLY, _O_WRONLY */
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <windows.h>
+
+static void close_handle(HANDLE *h) {
+	if (*h != NULL && *h != INVALID_HANDLE_VALUE) {
+		CloseHandle(*h);
+		*h = NULL;
+	}
+}
+
+/* Flatten argv into a single command-line string. Very minimal
+ * quoting: each arg that contains a space is wrapped in double
+ * quotes. No escaping of embedded quotes — operators passing
+ * paths with quotes in them must preprocess argv themselves. */
+static int build_cmdline(const char *const *argv, char *out, size_t cap) {
+	size_t pos = 0;
+	for (int i = 0; argv[i] != NULL; i++) {
+		const char *a = argv[i];
+		size_t len = strlen(a);
+		int needs_quotes = (strchr(a, ' ') != NULL);
+		size_t extra = (i == 0 ? 0 : 1) + (needs_quotes ? 2 : 0) + len;
+		if (pos + extra + 1 > cap) {
+			return -1;
+		}
+		if (i > 0) {
+			out[pos++] = ' ';
+		}
+		if (needs_quotes) {
+			out[pos++] = '"';
+		}
+		memcpy(out + pos, a, len);
+		pos += len;
+		if (needs_quotes) {
+			out[pos++] = '"';
+		}
+	}
+	out[pos] = '\0';
+	return 0;
+}
+
+int wtd_child_spawn(const char *const *argv, const char *const *envp,
+		wtd_child_t *out) {
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	out->pid = NULL;
+	out->stdin_fd = -1;
+	out->stdout_fd = -1;
+	out->stderr_fd = -1;
+	if (argv == NULL || argv[0] == NULL) {
+		return -EINVAL;
+	}
+	/* envp override is a nice-to-have; on Win32 we inherit the
+	 * parent environment for now. A future cycle can plumb a
+	 * UTF-16 environment block through CreateProcessW. */
+	(void)envp;
+
+	SECURITY_ATTRIBUTES sa = { 0 };
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	sa.lpSecurityDescriptor = NULL;
+
+	HANDLE in_rd = NULL, in_wr = NULL;
+	HANDLE out_rd = NULL, out_wr = NULL;
+	HANDLE err_rd = NULL, err_wr = NULL;
+
+	if (!CreatePipe(&in_rd, &in_wr, &sa, 0)) {
+		return -EIO;
+	}
+	if (!CreatePipe(&out_rd, &out_wr, &sa, 0)) {
+		close_handle(&in_rd); close_handle(&in_wr);
+		return -EIO;
+	}
+	if (!CreatePipe(&err_rd, &err_wr, &sa, 0)) {
+		close_handle(&in_rd); close_handle(&in_wr);
+		close_handle(&out_rd); close_handle(&out_wr);
+		return -EIO;
+	}
+
+	/* Parent-side handles must not be inherited by the child. */
+	SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+	SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
+	SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
+
+	char cmdline[4096];
+	if (build_cmdline(argv, cmdline, sizeof(cmdline)) != 0) {
+		close_handle(&in_rd); close_handle(&in_wr);
+		close_handle(&out_rd); close_handle(&out_wr);
+		close_handle(&err_rd); close_handle(&err_wr);
+		return -E2BIG;
+	}
+
+	STARTUPINFOA si = { 0 };
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdInput = in_rd;
+	si.hStdOutput = out_wr;
+	si.hStdError = err_wr;
+
+	PROCESS_INFORMATION pi = { 0 };
+	BOOL ok = CreateProcessA(
+			NULL,       /* lpApplicationName: look up via PATH */
+			cmdline,    /* lpCommandLine: mutated by CreateProcess */
+			NULL, NULL, /* process / thread security */
+			TRUE,       /* bInheritHandles */
+			0,          /* dwCreationFlags */
+			NULL,       /* lpEnvironment: inherit */
+			NULL,       /* lpCurrentDirectory: inherit */
+			&si, &pi);
+
+	/* Close child-side handles regardless of success. Parent-side
+	 * ones stay open (we'll wrap them as CRT fds on success). */
+	close_handle(&in_rd);
+	close_handle(&out_wr);
+	close_handle(&err_wr);
+
+	if (!ok) {
+		close_handle(&in_wr);
+		close_handle(&out_rd);
+		close_handle(&err_rd);
+		return -EIO;
+	}
+	CloseHandle(pi.hThread); /* we don't hold the primary thread */
+
+	int in_fd = _open_osfhandle((intptr_t)in_wr, _O_WRONLY);
+	int out_fd = _open_osfhandle((intptr_t)out_rd, _O_RDONLY);
+	int err_fd = _open_osfhandle((intptr_t)err_rd, _O_RDONLY);
+	if (in_fd < 0 || out_fd < 0 || err_fd < 0) {
+		if (in_fd >= 0) _close(in_fd); else close_handle(&in_wr);
+		if (out_fd >= 0) _close(out_fd); else close_handle(&out_rd);
+		if (err_fd >= 0) _close(err_fd); else close_handle(&err_rd);
+		TerminateProcess(pi.hProcess, 1);
+		CloseHandle(pi.hProcess);
+		return -EIO;
+	}
+
+	out->pid = pi.hProcess; /* HANDLE -> void* */
+	out->stdin_fd = in_fd;
+	out->stdout_fd = out_fd;
+	out->stderr_fd = err_fd;
+	return 0;
+}
+
+static void close_fd(int *p) {
+	if (*p >= 0) {
+		_close(*p);
+		*p = -1;
+	}
+}
+
+void wtd_child_terminate(wtd_child_t *child) {
+	if (child == NULL) {
+		return;
+	}
+	/* Close stdin first — most children exit on EOF. */
+	close_fd(&child->stdin_fd);
+	HANDLE h = (HANDLE)child->pid;
+	if (h != NULL) {
+		/* Give ~500 ms to exit on its own, then hard-kill. */
+		DWORD wait = WaitForSingleObject(h, 500);
+		if (wait != WAIT_OBJECT_0) {
+			TerminateProcess(h, 1);
+			WaitForSingleObject(h, INFINITE);
+		}
+		CloseHandle(h);
+		child->pid = NULL;
+	}
+	close_fd(&child->stdout_fd);
+	close_fd(&child->stderr_fd);
+}
+
+#else
+/* ===================== POSIX implementation ===================== */
+
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -148,3 +341,5 @@ void wtd_child_terminate(wtd_child_t *child) {
 	close_fd(&child->stdout_fd);
 	close_fd(&child->stderr_fd);
 }
+
+#endif /* _WIN32 */

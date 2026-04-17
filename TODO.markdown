@@ -254,10 +254,17 @@ useful slices, rough order of leverage-per-effort:
    and bump MAX above 2^30 so large reliable payloads don't force
    a session close. Smallest behavioural test: encode a 2^30-byte
    payload via a synthetic wrapper (no 1 GB buffer needed).
-4. **`child_process_win.c`.** Today `child_process.c` is POSIX
-   (fork + execvp + three pipe()s). Windows needs `CreateProcessW`
-   + three `CreatePipe`s + `SetHandleInformation` so they survive
-   exec. Test shape mirrors cycle 16.
+4. ✅ **`child_process.c` Win32 path (cycle 37).** `#ifdef _WIN32`
+   in the same file: `CreatePipe` ×3 with `SetHandleInformation`
+   on the parent-side ends, `CreateProcessA` with
+   `STARTF_USESTDHANDLES`, `_open_osfhandle` wraps the pipe
+   handles so the daemon's existing read/write/close calls still
+   work. `WTD_CHILD_PID_NONE` in child_process.h hides the pid_t
+   vs HANDLE switch from callers. `child_process_test.c` is still
+   POSIX-only (uses /bin/cat); the handshake tests cover the
+   Win32 path once their portability lands. Remaining: a dedicated
+   Win32 unit test using cmd.exe + findstr, and CreateProcess**W**
+   with a UTF-16 command line for non-ASCII paths.
 5. **`--dir=<path>` / `--staticdir=<path>`** — serve static files
    on non-WT request paths, mirroring websocketd's `http.go`.
    Needed for the devconsole story.

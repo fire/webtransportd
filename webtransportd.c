@@ -222,7 +222,7 @@ static wtd_peer_t *peer_create(server_ctx_t *s, picoquic_cnx_t *cnx) {
 		return NULL;
 	}
 	p->cnx = cnx;
-	p->child.pid = -1;
+	p->child.pid = WTD_CHILD_PID_NONE;
 	p->child.stdin_fd = -1;
 	p->child.stdout_fd = -1;
 	p->child.stderr_fd = -1;
@@ -232,7 +232,12 @@ static wtd_peer_t *peer_create(server_ctx_t *s, picoquic_cnx_t *cnx) {
 		int rc = wtd_child_spawn(argv, NULL, &p->child);
 		if (rc == 0) {
 			p->child_spawned = 1;
-			printf("child spawned pid=%ld\n", (long)p->child.pid);
+			/* pid is pid_t on POSIX and a HANDLE (void*) on Win32;
+			 * printing as an intptr_t-cast long long works for both
+			 * and keeps the test sentinel ("child spawned pid=...")
+			 * byte-for-byte stable. */
+			printf("child spawned pid=%lld\n",
+					(long long)(intptr_t)p->child.pid);
 			fflush(stdout);
 			wtd_peer_session_init(&p->peer_session);
 			p->peer_initialised = 1;
