@@ -237,6 +237,14 @@ handshake_echo_test: handshake_echo_test.c webtransportd $(VENDOR_ALL_OBJS)
 	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
 		-o $@ handshake_echo_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
 
+# Cycle 29: two concurrent clients against one daemon. Asserts each
+# sees its own echo, not the other's — exercises the per-cnx
+# wtd_peer_t split.
+handshake_multi_test: handshake_multi_test.c webtransportd $(VENDOR_ALL_OBJS)
+	@echo "  CC     $@ (two concurrent loopback clients)"
+	$(CC) $(CFLAGS) $(PICOQUIC_ISYSTEM) $(PICOQUIC_DEFS) \
+		-o $@ handshake_multi_test.c $(VENDOR_ALL_OBJS) $(LDFLAGS)
+
 %_test: %_test.c %.c %.h
 	@echo "  CC     $@ ($*.c + $<)"
 	$(CC) $(CFLAGS) -o $@ $*.c $< $(LDFLAGS)

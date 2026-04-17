@@ -45,6 +45,12 @@
  * picks up cycle 28's [LEVEL] prefix so a human reading stderr can
  * pick out [ERROR] lines from the routine [INFO] "child stderr:"
  * stream.
+ * Cycle 29: per-cnx state split. server_ctx_t holds a linked list
+ * of wtd_peer_t; each cnx gets its own spawned child, peer_session
+ * reader, and stderr forwarder. server_stream_cb looks up (or
+ * creates) the peer for the inbound cnx by pointer identity and
+ * routes echoes back through that peer only. Two concurrent clients
+ * no longer share state; they each see their own bytes come back.
  */
 
 #include "version.h"
@@ -151,29 +157,145 @@ static void stderr_fwd_stop(stderr_fwd_t *f) {
 	}
 }
 
+/* Cycle 29: per-cnx state. The daemon holds a linked list of these
+ * in server_ctx_t.peers; each cnx the server accepts gets its own
+ * spawned child, peer_session, stderr forwarder, and echo target. */
+typedef struct wtd_peer {
+	struct wtd_peer *next;
+	picoquic_cnx_t *cnx; /* key — compared by pointer identity */
+	wtd_child_t child;
+	wtd_peer_session_t peer_session;
+	stderr_fwd_t stderr_fwd;
+	uint64_t active_stream_id;
+	atomic_int frames_pending;
+	int child_spawned;
+	int peer_initialised;
+	int reader_started;
+	int stream_seen;
+} wtd_peer_t;
+
 typedef struct {
 	int client_reached_ready;
 	const char *exec_path;
-	wtd_child_t child;
-	int child_spawned;
-	wtd_peer_session_t peer;
-	int peer_initialised;
-	int reader_started;
-	stderr_fwd_t stderr_fwd;
-	atomic_int frames_pending;
-	/* Cycle 22d: the (cnx, stream_id) pair the current payload came
-	 * in on. Set by server_stream_cb, consumed by drain_outbound to
-	 * echo decoded frames back. Supports one active stream for now
-	 * (one client, one bidi stream); a future cycle replaces this
-	 * with a per-stream peer_session_t map. */
-	picoquic_cnx_t *active_cnx;
-	uint64_t active_stream_id;
-	int stream_seen;
+	wtd_peer_t *peers;
 } server_ctx_t;
 
 static void on_outbound_ready(void *arg) {
-	server_ctx_t *s = (server_ctx_t *)arg;
-	atomic_fetch_add(&s->frames_pending, 1);
+	wtd_peer_t *p = (wtd_peer_t *)arg;
+	atomic_fetch_add(&p->frames_pending, 1);
+}
+
+static wtd_peer_t *peer_find(server_ctx_t *s, picoquic_cnx_t *cnx) {
+	for (wtd_peer_t *p = s->peers; p != NULL; p = p->next) {
+		if (p->cnx == cnx) {
+			return p;
+		}
+	}
+	return NULL;
+}
+
+/* Allocate a new peer, spawn its child (if exec_path is set), wire
+ * the reader thread and stderr forwarder, and prepend to the list.
+ * Returns NULL only on OOM; spawn failures log ERROR and still
+ * return a peer so future stream data at least has a lookup target. */
+static wtd_peer_t *peer_create(server_ctx_t *s, picoquic_cnx_t *cnx) {
+	wtd_peer_t *p = (wtd_peer_t *)calloc(1, sizeof(*p));
+	if (p == NULL) {
+		return NULL;
+	}
+	p->cnx = cnx;
+	p->child.pid = -1;
+	p->child.stdin_fd = -1;
+	p->child.stdout_fd = -1;
+	p->child.stderr_fd = -1;
+
+	if (s->exec_path != NULL) {
+		const char *argv[] = { s->exec_path, NULL };
+		int rc = wtd_child_spawn(argv, NULL, &p->child);
+		if (rc == 0) {
+			p->child_spawned = 1;
+			printf("child spawned pid=%ld\n", (long)p->child.pid);
+			fflush(stdout);
+			wtd_peer_session_init(&p->peer_session);
+			p->peer_initialised = 1;
+			int rr = wtd_peer_session_start_reader(
+					&p->peer_session, p->child.stdout_fd,
+					on_outbound_ready, p);
+			if (rr == 0) {
+				p->reader_started = 1;
+			} else {
+				wtd_log(WTD_LOG_ERROR,
+						"webtransportd: start_reader rc=%d", rr);
+			}
+			(void)stderr_fwd_start(&p->stderr_fwd, p->child.stderr_fd);
+		} else {
+			wtd_log(WTD_LOG_ERROR,
+					"webtransportd: child_spawn(%s) rc=%d",
+					s->exec_path, rc);
+		}
+	}
+	p->next = s->peers;
+	s->peers = p;
+	return p;
+}
+
+static void drain_peer(wtd_peer_t *p) {
+	if (atomic_load(&p->frames_pending) == 0) {
+		return;
+	}
+	atomic_store(&p->frames_pending, 0);
+	wtd_outbound_frame_t *head = wtd_work_queue_drain(&p->peer_session.outbound);
+	while (head != NULL) {
+		wtd_outbound_frame_t *next = head->next;
+		printf("outbound frame: flag=%u len=%zu payload=",
+				(unsigned)head->flag, head->payload_len);
+		(void)fwrite(head->payload, 1, head->payload_len, stdout);
+		printf("\n");
+		fflush(stdout);
+		if (p->cnx != NULL && head->payload_len > 0) {
+			if (head->flag == WTD_FRAME_FLAG_UNRELIABLE) {
+				(void)picoquic_queue_datagram_frame(
+						p->cnx, head->payload_len, head->payload);
+			} else if (p->stream_seen) {
+				(void)picoquic_add_to_stream(
+						p->cnx, p->active_stream_id,
+						head->payload, head->payload_len, 0);
+			}
+		}
+		free(head);
+		head = next;
+	}
+}
+
+static void drain_all_peers(server_ctx_t *s) {
+	for (wtd_peer_t *p = s->peers; p != NULL; p = p->next) {
+		drain_peer(p);
+	}
+}
+
+/* Tear down one peer: terminate child (closes all 3 pipe fds, which
+ * wakes the reader + stderr forwarder to EOF), stop the forwarder,
+ * drain+destroy the peer_session, free the struct. */
+static void peer_destroy(wtd_peer_t *p) {
+	if (p->child_spawned) {
+		wtd_child_terminate(&p->child);
+	}
+	stderr_fwd_stop(&p->stderr_fwd);
+	if (p->peer_initialised) {
+		drain_peer(p); /* flush anything buffered */
+		wtd_peer_session_destroy(&p->peer_session);
+	}
+	free(p);
+}
+
+static void peer_destroy_all(server_ctx_t *s) {
+	wtd_peer_t *p = s->peers;
+	while (p != NULL) {
+		wtd_peer_t *next = p->next;
+		peer_destroy(p);
+		p = next;
+	}
+	s->peers = NULL;
 }
 
 /* Write every byte in buf[0..len) to fd, retrying short writes and
@@ -193,19 +315,16 @@ static int write_all(int fd, const uint8_t *buf, size_t len) {
 	return 0;
 }
 
-/* picoquic per-cnx callback. When the peer sends stream bytes, we
- * frame them (flag=0 reliable, varint len, payload) and write the
- * frame to the child's stdin_fd. Other events (stream_fin, close,
- * etc.) are ignored for now — 22c is inbound-data-only. */
+/* picoquic per-cnx callback. Finds (or creates) the wtd_peer_t for
+ * this cnx, frames the incoming bytes and writes them to that peer's
+ * child.stdin_fd. Each cnx gets its own child, so echoes can never
+ * be misrouted between concurrent clients. */
 static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 		uint8_t *bytes, size_t length,
 		picoquic_call_back_event_t event,
 		void *callback_ctx, void *stream_ctx) {
-	(void)cnx;
-	(void)stream_id;
 	(void)stream_ctx;
 	server_ctx_t *ctx = (server_ctx_t *)callback_ctx;
-
 	if (ctx == NULL) {
 		return 0;
 	}
@@ -213,74 +332,45 @@ static int server_stream_cb(picoquic_cnx_t *cnx, uint64_t stream_id,
 	uint8_t flag;
 	if (event == picoquic_callback_stream_data
 			|| event == picoquic_callback_stream_fin) {
-		/* Remember the cnx+stream regardless of payload length so
-		 * even a lone FIN registers the stream echo target. */
-		ctx->active_cnx = cnx;
-		ctx->active_stream_id = stream_id;
-		ctx->stream_seen = 1;
 		flag = WTD_FRAME_FLAG_RELIABLE;
 	} else if (event == picoquic_callback_datagram) {
-		/* Datagrams don't carry a stream id, but we still need a
-		 * cnx to echo back on via picoquic_queue_datagram_frame. */
-		ctx->active_cnx = cnx;
 		flag = WTD_FRAME_FLAG_UNRELIABLE;
 	} else {
 		return 0;
 	}
 
-	if (length == 0 || !ctx->child_spawned || ctx->child.stdin_fd < 0) {
+	wtd_peer_t *p = peer_find(ctx, cnx);
+	if (p == NULL) {
+		/* Very early data can arrive before server_loop_cb has noticed
+		 * the cnx reached ready (both run on the same thread, but the
+		 * loop callback can fire for unrelated events first). Create
+		 * the peer on demand so inbound data is never silently lost. */
+		p = peer_create(ctx, cnx);
+		if (p == NULL) {
+			return 0;
+		}
+	}
+
+	if (flag == WTD_FRAME_FLAG_RELIABLE) {
+		p->active_stream_id = stream_id;
+		p->stream_seen = 1;
+	}
+
+	if (length == 0 || !p->child_spawned || p->child.stdin_fd < 0) {
 		return 0;
 	}
 	uint8_t frame_buf[1 + 4 + 4096];
 	if (length > sizeof(frame_buf) - 1 - 4) {
-		/* Payload too large for the scratch buffer; drop for now.
-		 * A production path would either stream via multiple frames
-		 * or apply WT flow-control backpressure (future cycle). */
 		return 0;
 	}
 	size_t out_len = 0;
-	wtd_frame_status_t fs = wtd_frame_encode(flag,
-			bytes, length, frame_buf, sizeof(frame_buf), &out_len);
+	wtd_frame_status_t fs = wtd_frame_encode(flag, bytes, length,
+			frame_buf, sizeof(frame_buf), &out_len);
 	if (fs != WTD_FRAME_OK) {
 		return 0;
 	}
-	(void)write_all(ctx->child.stdin_fd, frame_buf, out_len);
+	(void)write_all(p->child.stdin_fd, frame_buf, out_len);
 	return 0;
-}
-
-static void drain_outbound(server_ctx_t *ctx) {
-	if (atomic_load(&ctx->frames_pending) == 0) {
-		return;
-	}
-	atomic_store(&ctx->frames_pending, 0);
-	wtd_outbound_frame_t *head = wtd_work_queue_drain(&ctx->peer.outbound);
-	while (head != NULL) {
-		wtd_outbound_frame_t *next = head->next;
-		printf("outbound frame: flag=%u len=%zu payload=",
-				(unsigned)head->flag, head->payload_len);
-		(void)fwrite(head->payload, 1, head->payload_len, stdout);
-		printf("\n");
-		fflush(stdout);
-		/* Cycle 22d/22e: echo the payload back on the channel it
-		 * came in on. flag=0 -> same QUIC stream via
-		 * picoquic_add_to_stream; flag=1 -> datagram frame via
-		 * picoquic_queue_datagram_frame. set_fin=0 so further
-		 * stream payloads still work; closing is the client's job. */
-		if (ctx->active_cnx != NULL && head->payload_len > 0) {
-			if (head->flag == WTD_FRAME_FLAG_UNRELIABLE) {
-				(void)picoquic_queue_datagram_frame(
-						ctx->active_cnx,
-						head->payload_len, head->payload);
-			} else if (ctx->stream_seen) {
-				(void)picoquic_add_to_stream(
-						ctx->active_cnx,
-						ctx->active_stream_id,
-						head->payload, head->payload_len, 0);
-			}
-		}
-		free(head);
-		head = next;
-	}
 }
 
 static int server_loop_cb(picoquic_quic_t *quic,
@@ -300,52 +390,24 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	if (atomic_load(&g_should_exit)) {
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
 	}
-	/* Walk connections; on the first one that reaches ready state,
-	 * spawn the configured child and attach the peer_session reader
-	 * + stderr forwarder. The daemon keeps running past that — only
-	 * SIGTERM stops the loop (see the should_exit check above). */
+	/* Walk every connection: for each that has reached ready, ensure
+	 * a wtd_peer_t exists (spawning a child + starting the reader on
+	 * first sighting). The daemon keeps running past the first ready
+	 * — only SIGTERM stops the loop. */
 	picoquic_cnx_t *cnx = picoquic_get_first_cnx(quic);
 	while (cnx != NULL) {
-		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready) {
+		if (picoquic_get_cnx_state(cnx) == picoquic_state_ready
+				&& peer_find(ctx, cnx) == NULL) {
+			(void)peer_create(ctx, cnx);
 			if (!ctx->client_reached_ready) {
 				ctx->client_reached_ready = 1;
 				printf("client reached ready\n");
 				fflush(stdout);
-				if (ctx->exec_path != NULL && !ctx->child_spawned) {
-					const char *argv[] = { ctx->exec_path, NULL };
-					int rc = wtd_child_spawn(argv, NULL, &ctx->child);
-					if (rc == 0) {
-						ctx->child_spawned = 1;
-						printf("child spawned pid=%ld\n",
-								(long)ctx->child.pid);
-						fflush(stdout);
-						wtd_peer_session_init(&ctx->peer);
-						ctx->peer_initialised = 1;
-						int rr = wtd_peer_session_start_reader(
-								&ctx->peer, ctx->child.stdout_fd,
-								on_outbound_ready, ctx);
-						if (rr == 0) {
-							ctx->reader_started = 1;
-						} else {
-							wtd_log(WTD_LOG_ERROR,
-									"webtransportd: start_reader rc=%d",
-									rr);
-						}
-						/* Cycle 23: start stderr forwarder. */
-						(void)stderr_fwd_start(&ctx->stderr_fwd,
-								ctx->child.stderr_fd);
-					} else {
-						wtd_log(WTD_LOG_ERROR,
-								"webtransportd: child_spawn(%s) rc=%d",
-								ctx->exec_path, rc);
-					}
-				}
 			}
-			break;
 		}
 		cnx = picoquic_get_next_cnx(cnx);
 	}
-	drain_outbound(ctx);
+	drain_all_peers(ctx);
 
 	return 0;
 }
@@ -359,10 +421,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	server_ctx_t sctx = { 0 };
 	sctx.exec_path = exec_path;
-	sctx.child.pid = -1;
-	sctx.child.stdin_fd = -1;
-	sctx.child.stdout_fd = -1;
-	sctx.child.stderr_fd = -1;
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 	/* default_callback_fn + default_callback_ctx are inherited by
@@ -393,19 +451,13 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
 
-	/* Closing the child's stdin/stdout/stderr (via wtd_child_terminate)
-	 * gives the reader + stderr-forwarder threads' blocking read()s
-	 * an EOF so they exit; then the *_stop/_destroy calls join them
-	 * and drain queues. Ordering: terminate child first so all three
-	 * pipe fds close simultaneously, then tear down the consumers. */
-	if (sctx.child_spawned) {
-		wtd_child_terminate(&sctx.child);
-	}
-	stderr_fwd_stop(&sctx.stderr_fwd);
-	if (sctx.peer_initialised) {
-		drain_outbound(&sctx); /* last flush of anything buffered */
-		wtd_peer_session_destroy(&sctx.peer);
-	}
+	/* Tear down every peer: each terminate closes the child's pipes,
+	 * reader + stderr forwarder see EOF, threads join, final queue
+	 * drain echoes any buffered frames (best-effort), free the
+	 * wtd_peer_t. Order matters: destroy peers before picoquic_free
+	 * because peer_destroy may call picoquic_add_to_stream on their
+	 * cnx, which must still be attached to the quic context. */
+	peer_destroy_all(&sctx);
 	picoquic_free(quic);
 
 	/* SIGTERM interrupts the loop's recvmsg/poll with EINTR, which the

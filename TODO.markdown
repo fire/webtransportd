@@ -21,9 +21,9 @@ self-contained — mbedtls, picoquic, and picotls are all vendored under
 | `child_process` | 16     | `fork + execvp` with 3 pipes, SIGTERM + reap                         |
 | `peer_session`  | 17–18  | Mutex-guarded FIFO work queue + reader thread that decodes frames    |
 | `thirdparty/`   | 21a–c  | Vendored picoquic + picohttp + picotls + mbedtls compile and link    |
-| `webtransportd` | 19–28  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level`     |
+| `webtransportd` | 19–29  | `--version`, `--selftest`, `--server` + `--exec` + `--log-level` + per-cnx `wtd_peer_t` list |
 
-All work lives in one directory under ASAN+UBSAN. 13 test binaries green:
+All work lives in one directory under ASAN+UBSAN. 14 test binaries green:
 
 ```
 $ make test
@@ -32,6 +32,7 @@ $ make test
   RUN    ./frame_fuzz_test
   RUN    ./frame_test
   RUN    ./handshake_echo_test
+  RUN    ./handshake_multi_test
   RUN    ./handshake_socket_test
   RUN    ./handshake_test
   RUN    ./log_test
@@ -204,22 +205,26 @@ isolated unit tests with deliberate RED-then-GREEN slices.
   `strstr("child stderr: oops", ...)` still match against
   `[INFO] child stderr: oops`, so nothing downstream broke.
 
+- **29** — **per-cnx `wtd_peer_t` list.** `server_ctx_t` used to
+  keep a single spawned child + `peer_session` + `active_cnx`, so
+  two concurrent clients would trample each other's echo target.
+  Each cnx now gets its own `wtd_peer_t` (child, peer_session,
+  stderr forwarder, active_stream_id, frames_pending), prepended
+  to a linked list on first observation. `server_stream_cb`
+  `peer_find`s by cnx pointer and routes encoded frames to that
+  peer's `child.stdin_fd`; `drain_all_peers` iterates every peer
+  and echoes decoded frames back through the peer's own cnx.
+  Cleanup tears every peer down in `peer_destroy_all` before
+  `picoquic_free`. New `handshake_multi_test` launches two clients
+  ("aaaaa" and "bbbbb") against one `--exec=/bin/cat` daemon,
+  asserts each client receives its own five bytes and none of
+  the other's, and that the daemon log shows both outbound frames.
+
 ## Next up
 
 (Nothing queued for v0.1 scope — streams + datagrams + child pipe
-all round-trip end-to-end. Below: follow-up polish and v0.2-ish
-features.)
-
-### Cycle 29 — per-cnx peer_session map (multi-client)
-
-Today `server_ctx_t` holds a single `active_cnx`, one spawned child,
-one `wtd_peer_session`. Two concurrent clients would overwrite each
-other's state and receive each other's echoes. Next cycle extracts
-`(child, peer_session, active_stream_id)` into a per-cnx `wtd_peer_t`
-keyed by `picoquic_cnx_t*`; the server spawns a child per cnx on
-first stream_data/datagram. A new test launches two clients against
-the same daemon and asserts each sees its own bytes, never the
-other's.
+round-trip end-to-end, multi-client works without cross-contamination.
+Below: follow-up polish and v0.2-ish features.)
 
 ## Design notes
 
