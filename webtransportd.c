@@ -321,6 +321,26 @@ static void drain_all_peers(server_ctx_t *s) {
 	}
 }
 
+/* Cycle 45: non-blocking write helper. Writes as many bytes as
+ * possible without blocking. Returns 0 on full write, 1 on
+ * EAGAIN/partial (*p_done updated), -errno on error. Never blocks. */
+static int write_partial(int fd, const uint8_t *buf, size_t len,
+		size_t *p_done) {
+	while (*p_done < len) {
+		ssize_t n = write(fd, buf + *p_done, len - *p_done);
+		if (n > 0) {
+			*p_done += (size_t)n;
+		} else if (n < 0 && errno == EINTR) {
+			continue;
+		} else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return 1;
+		} else {
+			return -errno;
+		}
+	}
+	return 0;
+}
+
 /* Cycle 45: attempt to drain pending buffer to child stdin. Called
  * on each loop tick to make progress on buffered frames that
  * encountered EAGAIN. */
@@ -360,26 +380,6 @@ static void peer_destroy_all(server_ctx_t *s) {
 		p = next;
 	}
 	s->peers = NULL;
-}
-
-/* Cycle 45: non-blocking write helper. Writes as many bytes as
- * possible without blocking. Returns 0 on full write, 1 on
- * EAGAIN/partial (*p_done updated), -errno on error. Never blocks. */
-static int write_partial(int fd, const uint8_t *buf, size_t len,
-		size_t *p_done) {
-	while (*p_done < len) {
-		ssize_t n = write(fd, buf + *p_done, len - *p_done);
-		if (n > 0) {
-			*p_done += (size_t)n;
-		} else if (n < 0 && errno == EINTR) {
-			continue;
-		} else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			return 1;
-		} else {
-			return -errno;
-		}
-	}
-	return 0;
 }
 
 /* picoquic per-cnx callback. Finds (or creates) the wtd_peer_t for
