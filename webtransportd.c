@@ -20,9 +20,11 @@
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
 #include "h3zero.h"
+#include "h3zero_common.h"
 #include "pico_webtransport.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -56,6 +58,7 @@ typedef struct server_ctx {
 	const char *exec_path;
 	const char *dir_path;
 	wtd_peer_t *peers;
+	picohttp_server_path_item_t *path_items;
 } server_ctx_t;
 
 static void on_sigterm(int sig) {
@@ -63,13 +66,205 @@ static void on_sigterm(int sig) {
 	atomic_store(&g_should_exit, 1);
 }
 
+static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
+		h3zero_callback_ctx_t *h3_ctx) __attribute__((unused));
+static wtd_peer_t *peer_create(server_ctx_t *sctx, picoquic_cnx_t *cnx,
+		h3zero_callback_ctx_t *h3_ctx) {
+	wtd_peer_t *p = malloc(sizeof(wtd_peer_t));
+	if (p == NULL) {
+		return NULL;
+	}
+	memset(p, 0, sizeof(wtd_peer_t));
+	p->cnx = cnx;
+	p->h3_ctx = h3_ctx;
+	p->sctx = sctx;
+	p->control_stream_id = UINT64_MAX;
+	p->data_stream_id = UINT64_MAX;
+
+	wtd_peer_session_init(&p->session);
+
+	const char *argv[] = { sctx->exec_path, NULL };
+	if (wtd_child_spawn(argv, NULL, &p->child) != 0) {
+		wtd_peer_session_destroy(&p->session);
+		free(p);
+		return NULL;
+	}
+	p->next = sctx->peers;
+	sctx->peers = p;
+	return p;
+}
+
+static void peer_accept_connect(server_ctx_t *sctx, picoquic_cnx_t *cnx,
+		h3zero_callback_ctx_t *h3_ctx, uint64_t control_stream_id)
+		__attribute__((unused));
+static void peer_accept_connect(server_ctx_t *sctx, picoquic_cnx_t *cnx,
+		h3zero_callback_ctx_t *h3_ctx, uint64_t control_stream_id) {
+	wtd_log(WTD_LOG_TRACE,
+			"[Placeholder] peer_accept_connect needed in Cycle 51: "
+			"register wt_session_cb for stream %" PRIu64,
+			control_stream_id);
+	(void)sctx;
+	(void)cnx;
+	(void)h3_ctx;
+	(void)control_stream_id;
+}
+
+static void peer_remove(server_ctx_t *sctx, wtd_peer_t *p) {
+	if (p == NULL) {
+		return;
+	}
+	wtd_peer_t **pp = &sctx->peers;
+	while (*pp != NULL && *pp != p) {
+		pp = &(*pp)->next;
+	}
+	if (*pp == p) {
+		*pp = p->next;
+	}
+	wtd_peer_session_destroy(&p->session);
+	wtd_child_terminate(&p->child);
+	if (p->pending_dgram != NULL) {
+		free(p->pending_dgram);
+	}
+	free(p);
+}
+
+
+static void drain_outbound(wtd_peer_t *p) {
+	if (p == NULL) {
+		return;
+	}
+
+	wtd_outbound_frame_t *frame = wtd_work_queue_drain(&p->session.outbound);
+	while (frame != NULL) {
+		wtd_outbound_frame_t *next = frame->next;
+
+		if (frame->flag == 0) {
+			if (p->data_stream_id != UINT64_MAX) {
+				picoquic_add_to_stream(p->cnx, p->data_stream_id,
+						frame->payload, frame->payload_len, 0);
+				wtd_log(WTD_LOG_TRACE,
+						"outbound frame: flag=%d len=%zu "
+						"payload=%.*s",
+						frame->flag, frame->payload_len,
+						(int)frame->payload_len,
+						frame->payload);
+			}
+		} else {
+			if (p->pending_dgram != NULL) {
+				free(p->pending_dgram);
+			}
+			p->pending_dgram = malloc(frame->payload_len);
+			if (p->pending_dgram != NULL) {
+				memcpy(p->pending_dgram, frame->payload,
+						frame->payload_len);
+				p->pending_dgram_len = frame->payload_len;
+				h3zero_set_datagram_ready(p->cnx,
+						p->control_stream_id);
+				wtd_log(WTD_LOG_TRACE,
+						"outbound frame: flag=%d len=%zu "
+						"payload=%.*s",
+						frame->flag, frame->payload_len,
+						(int)frame->payload_len,
+						frame->payload);
+			}
+		}
+		free(frame);
+		frame = next;
+	}
+}
+
+static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
+		uint8_t *bytes, size_t length, picohttp_call_back_event_t event,
+		h3zero_stream_ctx_t *stream_ctx, void *path_app_ctx)
+		__attribute__((unused));
+static int wt_session_cb(picoquic_cnx_t *cnx __attribute__((unused)),
+		uint8_t *bytes, size_t length, picohttp_call_back_event_t event,
+		h3zero_stream_ctx_t *stream_ctx, void *path_app_ctx) {
+	wtd_peer_t *p = (wtd_peer_t *)path_app_ctx;
+	int ret = 0;
+
+	switch (event) {
+	case picohttp_callback_post_data:
+	case picohttp_callback_post_fin: {
+		if (p == NULL) {
+			break;
+		}
+		if (p->data_stream_id == UINT64_MAX &&
+				stream_ctx->stream_id != p->control_stream_id) {
+			p->data_stream_id = stream_ctx->stream_id;
+		}
+		if (stream_ctx->stream_id != p->control_stream_id && length > 0) {
+			uint8_t frame_buf[4096];
+			size_t frame_len = 0;
+			ret = wtd_frame_encode(0, bytes, length, frame_buf,
+					sizeof(frame_buf), &frame_len);
+			if (ret == 0) {
+				(void)write(p->child.stdin_fd, frame_buf,
+						frame_len);
+			}
+		}
+		break;
+	}
+
+	case picohttp_callback_post_datagram:
+		if (p == NULL) {
+			break;
+		}
+		if (length > 0) {
+			uint8_t frame_buf[4096];
+			size_t frame_len = 0;
+			ret = wtd_frame_encode(1, bytes, length, frame_buf,
+					sizeof(frame_buf), &frame_len);
+			if (ret == 0) {
+				(void)write(p->child.stdin_fd, frame_buf,
+						frame_len);
+			}
+		}
+		break;
+
+	case picohttp_callback_provide_data:
+		if (p != NULL) {
+			drain_outbound(p);
+		}
+		break;
+
+	case picohttp_callback_provide_datagram:
+		if (p != NULL && p->pending_dgram != NULL) {
+			uint8_t *buf = h3zero_provide_datagram_buffer(
+					(void *)bytes, p->pending_dgram_len, 0);
+			if (buf != NULL) {
+				memcpy(buf, p->pending_dgram,
+						p->pending_dgram_len);
+			}
+			free(p->pending_dgram);
+			p->pending_dgram = NULL;
+			p->pending_dgram_len = 0;
+		}
+		break;
+
+	case picohttp_callback_deregister:
+		if (p != NULL) {
+			wtd_log(WTD_LOG_TRACE,
+					"[WebTransport] session closed");
+			peer_remove(p->sctx, p);
+		}
+		break;
+
+	default:
+		wtd_log(WTD_LOG_TRACE,
+				"[Placeholder] unhandled callback event: %d",
+				(int)event);
+		break;
+	}
+
+	return ret;
+}
 
 /* Packet loop callback */
 static int server_loop_cb(picoquic_quic_t *quic,
 		picoquic_packet_loop_cb_enum cb,
 		void *cb_ctx, void *cb_arg) {
 	(void)quic;
-	(void)cb_ctx;
 	(void)cb_arg;
 
 	if (cb == picoquic_packet_loop_ready) {
@@ -83,13 +278,10 @@ static int server_loop_cb(picoquic_quic_t *quic,
 		return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
 	}
 
-	/* TODO (Cycle 50): integrate server-side WT stream handling
-	 * - register server-side WT callback via picowt APIs
-	 * - spawn child process on CONNECT
-	 * - route stream/datagram data to/from child stdin/stdout
-	 * - drain outbound frames back to client */
-	wtd_log(WTD_LOG_TRACE,
-			"[UNIMPLEMENTED] server-side WebTransport stream routing not yet integrated");
+	server_ctx_t *sctx = (server_ctx_t *)cb_ctx;
+	for (wtd_peer_t *p = sctx->peers; p != NULL; p = p->next) {
+		drain_outbound(p);
+	}
 
 	return 0;
 }
@@ -106,7 +298,15 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	sigaction(SIGINT, &sa, NULL);
 #endif
 
-	server_ctx_t sctx = { exec_path, dir_path, NULL };
+	picohttp_server_parameters_t server_param = { 0 };
+	server_param.web_folder = dir_path;
+	server_param.path_table = NULL;
+	server_param.path_table_nb = 0;
+
+	server_ctx_t sctx = { exec_path, dir_path, NULL, NULL };
+
+	wtd_log(WTD_LOG_TRACE, "[Placeholder] server-side WebTransport stream"
+			" prefix registration needed in Cycle 51");
 
 	int use_autocert = (cert != NULL && strcmp(cert, "auto") == 0);
 	uint8_t *cert_der = NULL;
@@ -125,11 +325,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
 
-	static picohttp_server_parameters_t server_param = { 0 };
-	server_param.web_folder = dir_path;
-	server_param.path_table = NULL;
-	server_param.path_table_nb = 0;
-
 	picoquic_quic_t *quic = picoquic_create(
 			8,
 			use_autocert ? NULL : cert,
@@ -146,15 +341,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	}
 
 	wtd_log(WTD_LOG_INFO, "webtransportd: HTTP/3 server on port %u", port);
-
-	/* TODO (Cycle 50): server-side WebTransport integration
-	 * - implement server-side WT callback (stream/datagram handlers)
-	 * - restore peer_create/peer_remove for connection lifecycle
-	 * - integrate picowt stream prefix registration on CONNECT
-	 * see: thirdparty/picoquic/picohttp/wt_baton.c for reference pattern */
-	wtd_log(WTD_LOG_WARN,
-			"[PLACEHOLDER] server-side WebTransport not yet implemented; "
-			"CONNECT requests will timeout");
 
 	picowt_set_default_transport_parameters(quic);
 	(void)picoquic_set_default_tp_value(quic,
@@ -199,15 +385,6 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 
 	(void)picoquic_packet_loop_v3(&tctx);
 	int rc = tctx.return_code;
-
-	wtd_peer_t *p = sctx.peers;
-	while (p != NULL) {
-		wtd_peer_t *next = p->next;
-		wtd_peer_session_destroy(&p->session);
-		wtd_child_terminate(&p->child);
-		free(p);
-		p = next;
-	}
 
 	picoquic_free(quic);
 
