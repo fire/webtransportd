@@ -46,134 +46,6 @@ browser  ←─ QUIC/HTTP3 ─→  webtransportd  ←─ stdin/stdout ─→  yo
 
 Every message on either side is wrapped in a three-field frame: `[flag | varint len | payload]`. Your child reads frames from stdin and writes frames to stdout. The daemon handles all TLS, QUIC, and HTTP/3 machinery.
 
-## Framing
-
-Data exchanged between the daemon and child is framed as:
-
-```
-[flag | varint len | payload]
-```
-
-Where:
-- **flag** (1 byte): bit 0 selects reliable (0, WebTransport stream) vs unreliable (1, WebTransport datagram). Bits 1–7 are reserved and must be zero.
-- **varint len** (1–9 bytes): QUIC-style LEB128-encoded payload length (shortest form: 1 byte for values < 64, 2 for < 16384, 4 for < 1 073 741 824, 8 for larger).
-- **payload** (0–16 MiB): raw bytes.
-
-For example, a 5-byte reliable frame carrying `Hello`:
-
-```
-0x00           # flag: reliable stream
-0x05           # varint: length = 5
-0x48 0x65 0x6c 0x6c 0x6f  # "Hello"
-```
-
-See [`frame.h`](frame.h) for the encode/decode implementation.
-
-### frame-helper.sh
-
-`examples/frame-helper.sh` constructs a single frame on stdout, useful for piping to your child during development:
-
-```bash
-./examples/frame-helper.sh 0 "hello"   # reliable frame
-./examples/frame-helper.sh 1 "ping"    # unreliable datagram frame
-```
-
-You can pipe directly into any child binary for offline testing:
-
-```bash
-./examples/frame-helper.sh 0 "hello world" | ./examples/echo | xxd
-# 00000000: 000b 6865 6c6c 6f20 776f 726c 64   ..hello world
-
-{ ./examples/frame-helper.sh 0 "ping"; \
-  ./examples/frame-helper.sh 1 "dgram"; } | ./examples/echo | xxd
-# 00000000: 0004 7069 6e67 0105 6467 7261 6d   ..ping..dgram
-```
-
-## Writing a child process
-
-A child needs to read the frame stream from stdin and write responses to stdout. Below are three examples, from simplest to most capable.
-
-### C (compiled, zero-copy)
-
-`examples/echo.c` re-encodes every incoming payload unchanged. It uses the same `wtd_frame_decode`/`wtd_frame_encode` helpers from `frame.h`:
-
-```c
-wtd_frame_status_t st = wtd_frame_decode(buf, used,
-    &consumed, &flag, &payload, &plen);
-if (st == WTD_FRAME_OK)
-    wtd_frame_encode(flag, payload, plen, out_buf, BUF_CAP, &out_len);
-```
-
-Build and run:
-
-```bash
-make examples/echo
-./webtransportd --server --cert=auto --port=4433 --exec=./examples/echo
-```
-
-### Python (no compilation)
-
-`examples/echo.py` is a pure-Python drop-in for the C echo. It handles all four varint widths and works on any system with Python 3. Run it directly:
-
-```bash
-./webtransportd --server --cert=auto --port=4433 \
-    --exec="python3 ./examples/echo.py"
-```
-
-`examples/uppercase.py` demonstrates real processing — it uppercases the payload text and preserves the reliability flag:
-
-```bash
-./webtransportd --server --cert=auto --port=4433 \
-    --exec="python3 ./examples/uppercase.py"
-```
-
-Offline verification:
-
-```bash
-{ ./examples/frame-helper.sh 0 "hello world"; \
-  ./examples/frame-helper.sh 1 "datagram too"; } \
-  | python3 ./examples/uppercase.py | xxd
-# flag=0 "HELLO WORLD", flag=1 "DATAGRAM TOO"
-```
-
-`examples/counter.py` shows per-session state — it prepends a sequence number to each reply. Because webtransportd forks a fresh child per connection, the counter resets to 1 for every new session:
-
-```bash
-./webtransportd --server --cert=auto --port=4433 \
-    --exec="python3 ./examples/counter.py"
-```
-
-```bash
-{ ./examples/frame-helper.sh 0 "first"; \
-  ./examples/frame-helper.sh 0 "second"; \
-  ./examples/frame-helper.sh 1 "third (datagram)"; } \
-  | python3 ./examples/counter.py
-# [1] first   (reliable)
-# [2] second  (reliable)
-# [3] third (datagram)  (unreliable)
-```
-
-### Shell (one-liner)
-
-Any shell script that can produce correctly-framed bytes works. The simplest bridge uses `frame-helper.sh` to emit a single frame and exit — useful for smoke-testing or webhooks:
-
-```bash
-./webtransportd --server --cert=auto --port=4433 \
-    --exec="sh -c './examples/frame-helper.sh 0 pong'"
-```
-
-## Static file serving
-
-Pass `--dir=<path>` to serve ordinary HTTP/3 GET requests alongside WebTransport sessions. Non-WebTransport requests are resolved against the directory; `/wt` paths are reserved for the daemon.
-
-```bash
-mkdir -p ./public && echo '<h1>hello</h1>' > ./public/index.html
-./webtransportd --server --cert=auto --port=4433 \
-    --exec=./examples/echo --dir=./public
-```
-
-Browsers can then fetch `https://localhost:4433/index.html` and open a WebTransport session on the same port.
-
 ## CLI Flags
 
 | Flag | Default | Meaning |
@@ -219,6 +91,109 @@ The build includes an embedded UTF-8 manifest so command-line arguments and envi
 ```bash
 CC=x86_64-w64-mingw32-gcc make
 ```
+
+## Writing a child process
+
+A child needs to read the frame stream from stdin and write responses to stdout. Below are three examples, from simplest to most capable.
+
+### Framing
+
+Data exchanged between the daemon and child is framed as:
+
+```
+[flag | varint len | payload]
+```
+
+- **flag** (1 byte): bit 0 selects reliable (0, WebTransport stream) vs unreliable (1, WebTransport datagram). Bits 1–7 are reserved and must be zero.
+- **varint len** (1–9 bytes): QUIC-style LEB128-encoded payload length (shortest form: 1 byte for values < 64, 2 for < 16384, 4 for < 1 073 741 824, 8 for larger).
+- **payload** (0–16 MiB): raw bytes.
+
+For example, a 5-byte reliable frame carrying `Hello`:
+
+```
+0x00           # flag: reliable stream
+0x05           # varint: length = 5
+0x48 0x65 0x6c 0x6c 0x6f  # "Hello"
+```
+
+See [`frame.h`](frame.h) for the encode/decode implementation.
+
+`examples/frame-helper.sh` constructs a single frame on stdout, useful for offline testing:
+
+```bash
+./examples/frame-helper.sh 0 "hello"   # reliable frame
+./examples/frame-helper.sh 1 "ping"    # unreliable datagram frame
+
+./examples/frame-helper.sh 0 "hello world" | ./examples/echo | xxd
+# 00000000: 000b 6865 6c6c 6f20 776f 726c 64   ..hello world
+```
+
+### C (compiled, zero-copy)
+
+`examples/echo.c` re-encodes every incoming payload unchanged. It uses the same `wtd_frame_decode`/`wtd_frame_encode` helpers from `frame.h`:
+
+```c
+wtd_frame_status_t st = wtd_frame_decode(buf, used,
+    &consumed, &flag, &payload, &plen);
+if (st == WTD_FRAME_OK)
+    wtd_frame_encode(flag, payload, plen, out_buf, BUF_CAP, &out_len);
+```
+
+Build and run:
+
+```bash
+make examples/echo
+./webtransportd --server --cert=auto --port=4433 --exec=./examples/echo
+```
+
+### Python (no compilation)
+
+`examples/echo.py` is a pure-Python drop-in for the C echo. It handles all four varint widths and works on any system with Python 3:
+
+```bash
+./webtransportd --server --cert=auto --port=4433 \
+    --exec="python3 ./examples/echo.py"
+```
+
+`examples/uppercase.py` demonstrates real processing — it uppercases the payload text and preserves the reliability flag:
+
+```bash
+./webtransportd --server --cert=auto --port=4433 \
+    --exec="python3 ./examples/uppercase.py"
+```
+
+`examples/counter.py` shows per-session state — it prepends a sequence number to each reply. Because webtransportd forks a fresh child per connection, the counter resets to 1 for every new session:
+
+```bash
+{ ./examples/frame-helper.sh 0 "first"; \
+  ./examples/frame-helper.sh 0 "second"; \
+  ./examples/frame-helper.sh 1 "third (datagram)"; } \
+  | python3 ./examples/counter.py
+# [1] first   (reliable)
+# [2] second  (reliable)
+# [3] third (datagram)  (unreliable)
+```
+
+### Shell (one-liner)
+
+Any shell script that can produce correctly-framed bytes works. The simplest bridge uses `frame-helper.sh` to emit a single frame and exit — useful for smoke-testing or webhooks:
+
+```bash
+./webtransportd --server --cert=auto --port=4433 \
+    --exec="sh -c './examples/frame-helper.sh 0 pong'"
+```
+
+## Static file serving
+
+Pass `--dir=<path>` to serve ordinary HTTP/3 GET requests alongside WebTransport sessions. Non-WebTransport requests are resolved against the directory; `/wt` paths are reserved for the daemon.
+
+```bash
+mkdir -p ./public && echo '<h1>hello</h1>' > ./public/index.html
+./webtransportd --server --cert=auto --port=4433 \
+    --exec=./examples/echo --dir=./public
+```
+
+Browsers can then fetch `https://localhost:4433/index.html` and open a WebTransport session on the same port.
 
 ## Public Internet Exposure
 
