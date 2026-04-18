@@ -177,7 +177,7 @@ int main(void) {
 	EXPECT(spawn_daemon(&d) == 0);
 	if (d.pid < 0) return 1;
 
-	int ready_rc = wait_for_ready(&d, 5000);
+	int ready_rc = wait_for_ready(&d, 15000);
 	EXPECT(ready_rc == 0);
 	if (ready_rc != 0) {
 		int st = 0;

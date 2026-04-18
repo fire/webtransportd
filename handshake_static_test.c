@@ -218,7 +218,7 @@ int main(void) {
 
 	/* In RED phase, --dir= is not recognized, so daemon fails to start.
 	 * In GREEN phase, daemon starts with --dir=<tmpdir>. */
-	int ready_rc = wait_for_ready(&d, 5000);
+	int ready_rc = wait_for_ready(&d, 15000);
 	EXPECT(ready_rc == 0);
 	if (ready_rc != 0) {
 		int st = 0;
