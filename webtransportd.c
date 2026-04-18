@@ -386,6 +386,82 @@ static int server_loop_cb(picoquic_quic_t *quic,
 	return 0;
 }
 
+#include "mbedtls/pem.h"
+#include "mbedtls/pk.h"
+
+static uint8_t *pem_to_der(const uint8_t *pem, size_t pem_len, size_t *der_len) {
+    mbedtls_pk_context pk_ctx;
+    mbedtls_pk_init(&pk_ctx);
+    
+    int rc = mbedtls_pk_parse_key(&pk_ctx, pem, pem_len, NULL, 0, NULL, NULL);
+    if (rc != 0) {
+        wtd_log(WTD_LOG_ERROR, "Failed to parse PEM key: %d", rc);
+        mbedtls_pk_free(&pk_ctx);
+        return NULL;
+    }
+    
+    uint8_t *der = malloc(4096);
+    if (der == NULL) {
+        wtd_log(WTD_LOG_ERROR, "Failed to allocate DER buffer");
+        mbedtls_pk_free(&pk_ctx);
+        return NULL;
+    }
+    
+    rc = mbedtls_pk_write_key_der(&pk_ctx, der, 4096);
+    if (rc < 0) {
+        wtd_log(WTD_LOG_ERROR, "Failed to write DER key: %d", rc);
+        free(der);
+        mbedtls_pk_free(&pk_ctx);
+        return NULL;
+    }
+    
+    memmove(der, der + 4096 - rc, rc);
+    *der_len = rc;
+    mbedtls_pk_free(&pk_ctx);
+    return der;
+}
+
+static uint8_t *read_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: fopen(%s) failed: %s", path, strerror(errno));
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: fseek(%s) failed: %s", path, strerror(errno));
+        fclose(f);
+        return NULL;
+    }
+    long file_len = ftell(f);
+    if (file_len < 0) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: ftell(%s) failed: %s", path, strerror(errno));
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: fseek(%s) failed: %s", path, strerror(errno));
+        fclose(f);
+        return NULL;
+    }
+    uint8_t *buf = (uint8_t *)malloc(file_len + 1);
+    if (buf == NULL) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: malloc(%ld) failed", file_len + 1);
+        fclose(f);
+        return NULL;
+    }
+    size_t read_len = fread(buf, 1, file_len, f);
+    if (read_len != (size_t)file_len) {
+        wtd_log(WTD_LOG_ERROR, "webtransportd: fread(%s) failed: %zu != %ld", path, read_len, file_len);
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    buf[file_len] = '\0';
+    *len = file_len;
+    return buf;
+}
+
 static int cmd_server(const char *cert, const char *key, uint16_t port,
 		const char *exec_path, const char *dir_path) {
 #ifdef _WIN32
@@ -448,32 +524,98 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	(void)picoquic_set_default_tp_value(quic,
 			picoquic_tp_max_datagram_frame_size, 1500);
 
-	if (use_autocert) {
-		ptls_iovec_t *chain = (ptls_iovec_t *)malloc(
-				sizeof(ptls_iovec_t));
-		if (chain == NULL) {
-			wtd_log(WTD_LOG_ERROR,
-					"webtransportd: chain alloc failed");
-			picoquic_free(quic);
-			free(cert_der);
-			free(key_der);
-			return 1;
-		}
-		chain[0].base = cert_der;
-		chain[0].len = cert_der_len;
-		picoquic_set_tls_certificate_chain(quic, chain, 1);
-		cert_der = NULL;
+    if (use_autocert) {
+        wtd_log(WTD_LOG_TRACE, "webtransportd: using autocert");
+        ptls_iovec_t *chain = (ptls_iovec_t *)malloc(
+            sizeof(ptls_iovec_t));
+        if (chain == NULL) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: chain alloc failed");
+            picoquic_free(quic);
+            free(cert_der);
+            free(key_der);
+            return 1;
+        }
+        chain[0].base = cert_der;
+        chain[0].len = cert_der_len;
+        picoquic_set_tls_certificate_chain(quic, chain, 1);
+        wtd_log(WTD_LOG_TRACE, "webtransportd: cert chain installed");
+        cert_der = NULL;
 
-		if (picoquic_set_tls_key(quic, key_der, key_der_len) != 0) {
-			wtd_log(WTD_LOG_ERROR,
-					"webtransportd: key install failed");
-			picoquic_free(quic);
-			free(key_der);
-			return 1;
-		}
-		free(key_der);
-		key_der = NULL;
-	}
+        wtd_log(WTD_LOG_TRACE, "webtransportd: installing key (len=%zu)", key_der_len);
+        if (picoquic_set_tls_key(quic, key_der, key_der_len) != 0) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: key install failed");
+            picoquic_free(quic);
+            free(key_der);
+            return 1;
+        }
+        wtd_log(WTD_LOG_TRACE, "webtransportd: key installed");
+        free(key_der);
+        key_der = NULL;
+    } else {
+        wtd_log(WTD_LOG_TRACE, "webtransportd: using cert=%s, key=%s", cert, key);
+        wtd_log(WTD_LOG_TRACE, "webtransportd: reading cert file");
+        cert_der = read_file(cert, &cert_der_len);
+        if (cert_der == NULL) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: cert file read failed");
+            picoquic_free(quic);
+            return 1;
+        }
+        wtd_log(WTD_LOG_TRACE, "webtransportd: cert file read (%zu bytes)", cert_der_len);
+
+        wtd_log(WTD_LOG_TRACE, "webtransportd: reading key file");
+        uint8_t *key_pem = read_file(key, &key_der_len);
+        if (key_pem == NULL) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: key file read failed");
+            picoquic_free(quic);
+            free(cert_der);
+            return 1;
+        }
+        wtd_log(WTD_LOG_TRACE, "webtransportd: key file read (%zu bytes)", key_der_len);
+
+        wtd_log(WTD_LOG_TRACE, "webtransportd: converting key from PEM to DER");
+        key_der = pem_to_der(key_pem, key_der_len, &key_der_len);
+        free(key_pem);
+        if (key_der == NULL) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: key PEM-to-DER conversion failed");
+            picoquic_free(quic);
+            free(cert_der);
+            return 1;
+        }
+        wtd_log(WTD_LOG_TRACE, "webtransportd: key converted to DER (%zu bytes)", key_der_len);
+
+        ptls_iovec_t *chain = (ptls_iovec_t *)malloc(
+            sizeof(ptls_iovec_t));
+        if (chain == NULL) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: chain alloc failed");
+            picoquic_free(quic);
+            free(cert_der);
+            free(key_der);
+            return 1;
+        }
+        chain[0].base = cert_der;
+        chain[0].len = cert_der_len;
+        picoquic_set_tls_certificate_chain(quic, chain, 1);
+        wtd_log(WTD_LOG_TRACE, "webtransportd: cert chain installed");
+        cert_der = NULL;
+
+        wtd_log(WTD_LOG_TRACE, "webtransportd: installing key (len=%zu)", key_der_len);
+        if (picoquic_set_tls_key(quic, key_der, key_der_len) != 0) {
+            wtd_log(WTD_LOG_ERROR,
+                "webtransportd: key install failed");
+            picoquic_free(quic);
+            free(key_der);
+            return 1;
+        }
+        wtd_log(WTD_LOG_TRACE, "webtransportd: key installed");
+        free(key_der);
+        key_der = NULL;
+    }
 
 	picoquic_packet_loop_param_t param = { 0 };
 	param.local_af = AF_INET;
