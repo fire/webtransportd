@@ -94,7 +94,7 @@ CC=x86_64-w64-mingw32-gcc make
 
 ## Writing a child process
 
-A child needs to read the frame stream from stdin and write responses to stdout. Below are three examples, from simplest to most capable.
+A child reads the frame stream from stdin and writes responses to stdout. Three examples follow, from simplest to most capable.
 
 ### Framing
 
@@ -176,7 +176,7 @@ make examples/echo
 
 ### Shell (one-liner)
 
-Any shell script that can produce correctly-framed bytes works. The simplest bridge uses `frame-helper.sh` to emit a single frame and exit — useful for smoke-testing or webhooks:
+Any shell script that produces correctly-framed bytes works. The simplest bridge uses `frame-helper.sh` to emit a single frame and exit — useful for smoke-testing or webhooks:
 
 ```bash
 ./webtransportd --server --cert=auto --port=4433 \
@@ -185,7 +185,7 @@ Any shell script that can produce correctly-framed bytes works. The simplest bri
 
 ## Static file serving
 
-Pass `--dir=<path>` to serve ordinary HTTP/3 GET requests alongside WebTransport sessions. Non-WebTransport requests are resolved against the directory; `/wt` paths are reserved for the daemon.
+Pass `--dir=<path>` to serve ordinary HTTP/3 GET requests alongside WebTransport sessions. Non-WebTransport requests resolve against the directory; `/wt` paths are reserved for the daemon.
 
 ```bash
 mkdir -p ./public && echo '<h1>hello</h1>' > ./public/index.html
@@ -217,7 +217,7 @@ For local development across machines, Tailscale's mesh (node-to-node, not Funne
 
 ## Relationship to Godot
 
-The vendored libraries in `thirdparty/` (picoquic, picotls, mbedtls) are **snapshots** pulled from Godot's tree to ensure compatibility. The daemon itself is intentionally independent — it requires no Godot toolchain and can run standalone on any POSIX system or Windows.
+The vendored libraries in `thirdparty/` (picoquic, picotls, mbedtls) are **snapshots** pulled from Godot's tree to ensure compatibility. The daemon requires no Godot toolchain and runs standalone on any POSIX system or Windows.
 
 If you are using WebTransport inside the Godot engine, see [Godot's `modules/http3/`](https://github.com/godotengine/godot/tree/master/modules/http3) for the same stack integrated into the editor and runtime.
 
