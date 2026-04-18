@@ -185,7 +185,8 @@ endif()
 # webtransportd binary
 # ---------------------------------------------------------------------------
 add_executable(webtransportd ${DAEMON_SRCS} ${WINRES_EXTRA})
-target_include_directories(webtransportd PRIVATE src/include ${VENDOR_INCLUDES})
+target_include_directories(webtransportd PRIVATE src/include)
+target_include_directories(webtransportd SYSTEM PRIVATE ${VENDOR_INCLUDES})
 target_compile_definitions(webtransportd PRIVATE ${PICOQUIC_DEFS})
 target_link_libraries(webtransportd vendored ${PLATFORM_LDEXTRA})
 if(WIN32)
@@ -213,7 +214,8 @@ enable_testing()
 # Helper: link a test against the full vendored stack
 function(add_vendor_test name)
     add_executable(${name} tests/unit/${name}.c ${ARGN})
-    target_include_directories(${name} PRIVATE src/include ${VENDOR_INCLUDES})
+    target_include_directories(${name} PRIVATE src/include)
+    target_include_directories(${name} SYSTEM PRIVATE ${VENDOR_INCLUDES})
     target_compile_definitions(${name} PRIVATE ${PICOQUIC_DEFS})
     target_link_libraries(${name} vendored ${PLATFORM_LDEXTRA})
     add_test(NAME ${name} COMMAND ${name}
