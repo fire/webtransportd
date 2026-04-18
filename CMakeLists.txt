@@ -145,6 +145,13 @@ endif()
 target_compile_definitions(vendored PRIVATE ${PICOQUIC_DEFS})
 target_include_directories(vendored SYSTEM PRIVATE ${VENDOR_INCLUDES})
 target_link_libraries(vendored PUBLIC Threads::Threads ${PLATFORM_LIBS})
+# picotls.c on Windows calls wintimeofday (via wincompat.h's gettimeofday
+# #define).  The shim lives in our tree; compile it with -w alongside the
+# rest of the vendor pile so all vendor tests resolve the symbol.
+if(WIN32)
+    target_sources(vendored PRIVATE src/core/wtd_wincompat.c)
+    target_include_directories(vendored SYSTEM PRIVATE ${VENDOR_INCLUDES})
+endif()
 
 # ---------------------------------------------------------------------------
 # Windows resource file (UTF-8 manifest)
@@ -177,9 +184,6 @@ set(DAEMON_SRCS
     src/core/frame.c
     src/core/log.c
 )
-if(WIN32)
-    list(APPEND DAEMON_SRCS src/core/wtd_wincompat.c)
-endif()
 
 # ---------------------------------------------------------------------------
 # webtransportd binary
