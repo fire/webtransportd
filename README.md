@@ -12,22 +12,29 @@ make
     --exec=./examples/echo
 ```
 
-Then in your browser (Chrome, tested):
+The server prints a `cert-hash:` line on startup. Pass it to `serverCertificateHashes` so the browser accepts the self-signed cert without any flag or trust-store import:
 
 ```javascript
-const transport = new WebTransport('https://localhost:4433/');
+// Replace HASH_B64 with the cert-hash printed by the server on startup.
+const HASH_B64 = "abc123...==";
+const hashBytes = Uint8Array.from(atob(HASH_B64), c => c.charCodeAt(0));
+
+const transport = new WebTransport('https://localhost:4433/wt', {
+  serverCertificateHashes: [{ algorithm: "sha-256", value: hashBytes }]
+});
 await transport.ready;
 
-const {readable, writable} = await transport.createBidirectionalStream();
-const writer = writable.getWriter();
-const reader = readable.getReader();
+const stream = await transport.createBidirectionalStream();
+const writer = stream.writable.getWriter();
+const reader = stream.readable.getReader();
 
-await writer.write(new Uint8Array([0x48, 0x69])); // "Hi"
-const {value} = await reader.read();
+await writer.write(new TextEncoder().encode("Hi"));
+await writer.close();
+const { value } = await reader.read();
 console.log(new TextDecoder().decode(value)); // "Hi" echoed back
 ```
 
-Note: `--cert=auto` generates a self-signed certificate. Your browser will require the DevTools flag `chrome://flags/#unsafely-treat-insecure-origin-as-secure` set to `https://localhost:4433`, or a manual import of the certificate into your system trust store.
+Works in Chrome and Firefox. The cert rotates every 13 days (required by the `serverCertificateHashes` spec); update the hash in your client when you restart the server.
 
 ## How it works
 
@@ -212,6 +219,26 @@ The build includes an embedded UTF-8 manifest so command-line arguments and envi
 ```bash
 CC=x86_64-w64-mingw32-gcc make
 ```
+
+## Public Internet Exposure
+
+WebTransport runs over QUIC (UDP), so TCP-only tunnels and proxies do not work. Services that support UDP/QUIC forwarding:
+
+| Option | Type | Notes |
+|--------|------|-------|
+| **AWS Network Load Balancer** | UDP passthrough | QUIC Connection ID stickiness; production-ready |
+| **GCP Network Load Balancer** | UDP passthrough | Works; no explicit WebTransport docs |
+| **Fly.io** | UDP port | Requires dedicated IPv4; bind to `fly-global-services` |
+| **frp** | Self-hosted UDP | Open source; runs on any VPS |
+
+Services that do **not** work (TCP only, QUIC is dropped):
+
+- Tailscale Funnel
+- Cloudflare Tunnel (Argo)
+- Railway public networking
+- Most PaaS HTTP reverse proxies (nginx, Caddy, HAProxy cannot forward to a QUIC backend)
+
+For local development across machines, Tailscale's mesh (node-to-node, not Funnel) works because the mesh itself supports UDP.
 
 ## Relationship to Godot
 

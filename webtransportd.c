@@ -495,7 +495,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
         wtd_log(WTD_LOG_TRACE, "webtransportd: cert chain installed");
         cert_der = NULL;
 
-        wtd_log(WTD_LOG_TRACE, "webtransportd: installing key (len=%zu)", key_der_len);
+        wtd_log(WTD_LOG_TRACE, "webtransportd: installing key (len=%lu)", (unsigned long)key_der_len);
         if (picoquic_set_tls_key(quic, key_der, key_der_len) != 0) {
             wtd_log(WTD_LOG_ERROR,
                 "webtransportd: key install failed");
