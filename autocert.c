@@ -27,7 +27,7 @@
  * need a different subject / validity should ship their own PEM
  * pair instead of using --cert=auto. */
 #define AUTOCERT_CN              "CN=webtransportd-autocert"
-#define AUTOCERT_VALID_DAYS      30
+#define AUTOCERT_VALID_DAYS      13
 #define AUTOCERT_DER_CAP         (4 * 1024)  /* DER fits well under 1 KiB */
 #define AUTOCERT_KEY_DER_CAP     (1 * 1024)
 
@@ -106,7 +106,7 @@ int wtd_autocert_generate(uint8_t **p_cert_der, size_t *p_cert_len,
 		goto out;
 	}
 
-	/* Validity: now → now + 30 days. */
+	/* Validity: now → now + 13 days (≤14 required for serverCertificateHashes). */
 	time_t now = time(NULL);
 	time_t end = now + (time_t)AUTOCERT_VALID_DAYS * 24 * 60 * 60;
 	char nb[16] = { 0 };

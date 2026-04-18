@@ -23,6 +23,9 @@
 #include "h3zero_common.h"
 #include "pico_webtransport.h"
 
+#include "mbedtls/base64.h"
+#include "mbedtls/sha256.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -424,6 +427,15 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 					"webtransportd: --cert=auto failed");
 			return 1;
 		}
+		/* Print base64-encoded SHA-256 of DER cert so callers can use
+		 * serverCertificateHashes to bypass CA trust. */
+		unsigned char hash[32];
+		mbedtls_sha256(cert_der, cert_der_len, hash, 0);
+		unsigned char b64[48];
+		size_t b64_len = 0;
+		mbedtls_base64_encode(b64, sizeof(b64), &b64_len, hash, sizeof(hash));
+		printf("cert-hash: %.*s\n", (int)b64_len, b64);
+		fflush(stdout);
 	}
 
 	uint8_t reset_seed[PICOQUIC_RESET_SECRET_SIZE] = { 0 };
