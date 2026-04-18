@@ -12,6 +12,7 @@
 #include "frame.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -62,6 +63,7 @@ void wtd_peer_session_init(wtd_peer_session_t *s) {
 	s->reader_fd = -1;
 	s->on_ready = NULL;
 	s->on_ready_ctx = NULL;
+	atomic_store(&s->reader_done, 0);
 }
 
 /* Large enough to hold one full-size frame (flag + 4-byte varint + max
@@ -128,6 +130,10 @@ static void *reader_main(void *arg) {
 	}
 
 done:
+	atomic_store(&s->reader_done, 1);
+	if (s->on_ready != NULL) {
+		s->on_ready(s->on_ready_ctx);
+	}
 	free(buf);
 	return NULL;
 }

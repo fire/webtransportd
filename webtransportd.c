@@ -77,6 +77,8 @@ typedef struct wtd_peer {
 	server_ctx_t *sctx;
 	uint8_t *pending_dgram;
 	size_t pending_dgram_len;
+	int child_stdin_closed; /* set after post_fin closes child stdin */
+	int stream_fin_sent;    /* set after FIN sent on data stream */
 } wtd_peer_t;
 
 typedef struct server_ctx {
@@ -161,7 +163,7 @@ static void drain_outbound(wtd_peer_t *p) {
 	}
 
 	wtd_outbound_frame_t *frame = wtd_work_queue_drain(&p->session.outbound);
-	if (frame == NULL) {
+	if (frame == NULL && (!atomic_load(&p->session.reader_done) || p->stream_fin_sent)) {
 		return;
 	}
 	while (frame != NULL) {
@@ -204,6 +206,14 @@ static void drain_outbound(wtd_peer_t *p) {
 		}
 		free(frame);
 		frame = next;
+	}
+	if (atomic_load(&p->session.reader_done) && !p->stream_fin_sent
+			&& p->data_stream_id != UINT64_MAX) {
+		picoquic_add_to_stream(p->cnx, p->data_stream_id, NULL, 0, 1);
+		p->stream_fin_sent = 1;
+		wtd_log(WTD_LOG_TRACE,
+				"sent stream FIN on data_stream %" PRIu64,
+				p->data_stream_id);
 	}
 }
 
@@ -268,26 +278,29 @@ static int wt_session_cb(picoquic_cnx_t *cnx, uint8_t *bytes, size_t length,
 					" data_stream_id set to %" PRIu64,
 					p->data_stream_id);
 		}
-		if (length == 0) {
-			wtd_log(WTD_LOG_TRACE,
-					" post_data: length==0, skipping");
-			break;
+		if (length > 0 && !p->child_stdin_closed) {
+			uint8_t frame_buf[4096];
+			size_t frame_len = 0;
+			ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
+					sizeof(frame_buf), &frame_len);
+			if (ret2 == 0) {
+				ssize_t nwritten = write(p->child.stdin_fd,
+						frame_buf, frame_len);
+				wtd_log(WTD_LOG_TRACE,
+						" wrote %lu bytes to "
+						"child stdin (ret=%ld)",
+						(unsigned long)frame_len, (long)nwritten);
+			} else {
+				wtd_log(WTD_LOG_ERROR,
+						" wtd_frame_encode "
+						"failed: %d", ret2);
+			}
 		}
-		uint8_t frame_buf[4096];
-		size_t frame_len = 0;
-		ret2 = wtd_frame_encode(0, bytes, length, frame_buf,
-				sizeof(frame_buf), &frame_len);
-		if (ret2 == 0) {
-			ssize_t nwritten = write(p->child.stdin_fd,
-					frame_buf, frame_len);
-			wtd_log(WTD_LOG_TRACE,
-					" wrote %lu bytes to "
-					"child stdin (ret=%ld)",
-					(unsigned long)frame_len, (long)nwritten);
-		} else {
-			wtd_log(WTD_LOG_ERROR,
-					" wtd_frame_encode "
-					"failed: %d", ret2);
+		if (event == picohttp_callback_post_fin && !p->child_stdin_closed) {
+			close(p->child.stdin_fd);
+			p->child.stdin_fd = -1;
+			p->child_stdin_closed = 1;
+			wtd_log(WTD_LOG_TRACE, " post_fin: closed child stdin");
 		}
 		break;
 	}
@@ -462,6 +475,9 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 			picoquic_tp_max_datagram_frame_size, 1500);
 
     if (use_autocert) {
+        /* picoquic_create() sets enforce_client_only=1 when cert_file_name
+         * is NULL; clear it so the server accepts incoming connections. */
+        picoquic_enforce_client_only(quic, 0);
         wtd_log(WTD_LOG_TRACE, "webtransportd: using autocert");
         ptls_iovec_t *chain = (ptls_iovec_t *)malloc(
             sizeof(ptls_iovec_t));
@@ -494,7 +510,7 @@ static int cmd_server(const char *cert, const char *key, uint16_t port,
 	/* else: picoquic_create already loaded cert/key from the file paths */
 
 	picoquic_packet_loop_param_t param = { 0 };
-	param.local_af = AF_INET;
+	param.local_af = 0; /* 0 = dual-stack: bind both AF_INET and AF_INET6 */
 	param.local_port = port;
 
 	picoquic_network_thread_ctx_t tctx = { 0 };

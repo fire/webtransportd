@@ -25,6 +25,7 @@
 #define WEBTRANSPORTD_PEER_SESSION_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -64,6 +65,7 @@ typedef struct wtd_peer_session {
 	int reader_fd;
 	wtd_on_outbound_ready_fn on_ready;
 	void *on_ready_ctx;
+	_Atomic int reader_done; /* set to 1 by reader_main before it exits */
 } wtd_peer_session_t;
 
 void wtd_peer_session_init(wtd_peer_session_t *s);

@@ -30,3 +30,4 @@
 # Editor / OS noise
 .DS_Store
 .vscode/
+webtransportd.log

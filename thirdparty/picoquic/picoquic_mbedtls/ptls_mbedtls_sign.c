@@ -571,6 +571,46 @@ int ptls_mbedtls_set_available_schemes(ptls_mbedtls_sign_certificate_t *signer)
 * a convenience API.
 */
 
+/* PSA ECDSA returns raw r||s; TLS CertificateVerify requires DER SEQUENCE { INTEGER r, INTEGER s }.
+ * This converts in-place: reads raw from [raw, raw+raw_len), writes DER to [der, der+der_cap).
+ * Returns 0 on success, -1 if der_cap is too small (max DER size = 2 + 2*(2+1+n) where n=raw_len/2). */
+static int ecdsa_raw_to_der(const uint8_t *raw, size_t raw_len,
+                            uint8_t *der, size_t der_cap, size_t *der_len)
+{
+    size_t n = raw_len / 2;
+    const uint8_t *r = raw, *s = raw + n;
+
+    /* skip leading zeros but keep at least one byte */
+    size_t ri = 0, si = 0;
+    while (ri < n - 1 && r[ri] == 0) ri++;
+    while (si < n - 1 && s[si] == 0) si++;
+
+    size_t rl = n - ri, sl = n - si;
+    size_t rp = (r[ri] >> 7) & 1;  /* prepend 0x00 if high bit set */
+    size_t sp = (s[si] >> 7) & 1;
+    size_t r_enc = rl + rp, s_enc = sl + sp;
+    size_t seq_len = 2 + r_enc + 2 + s_enc;
+    size_t total = 2 + seq_len;
+
+    if (total > der_cap)
+        return -1;
+
+    uint8_t *p = der;
+    *p++ = 0x30;
+    *p++ = (uint8_t)seq_len;
+    *p++ = 0x02;
+    *p++ = (uint8_t)r_enc;
+    if (rp) *p++ = 0x00;
+    memcpy(p, r + ri, rl); p += rl;
+    *p++ = 0x02;
+    *p++ = (uint8_t)s_enc;
+    if (sp) *p++ = 0x00;
+    memcpy(p, s + si, sl); p += sl;
+
+    *der_len = total;
+    return 0;
+}
+
 int ptls_mbedtls_sign_certificate(ptls_sign_certificate_t *_self, ptls_t *tls, ptls_async_job_t **async,
     uint16_t *selected_algorithm, ptls_buffer_t *outbuf, ptls_iovec_t input,
     const uint16_t *algorithms, size_t num_algorithms)
@@ -616,11 +656,27 @@ int ptls_mbedtls_sign_certificate(ptls_sign_certificate_t *_self, ptls_t *tls, p
             } else if (sign_algo != PSA_ALG_RSA_PKCS1V15_SIGN_RAW) {
                 nb_bytes *= 2;
             }
-            if ((ret = ptls_buffer_reserve(outbuf, nb_bytes)) == 0) {
+            /* For ECDSA, PSA returns raw r||s but TLS needs DER; reserve
+             * extra headroom for the DER wrapper (max 6 bytes overhead +
+             * two possible 0x00 sign-extension bytes = 8 bytes). */
+            int is_ecdsa = PSA_ALG_IS_ECDSA(sign_algo);
+            size_t reserve_bytes = nb_bytes + (is_ecdsa ? 8 : 0);
+            if ((ret = ptls_buffer_reserve(outbuf, reserve_bytes)) == 0) {
                 size_t signature_length = 0;
-                if (psa_sign_hash(self->key_id, sign_algo, hash_value, hash_length, outbuf->base + outbuf->off, nb_bytes,
+                uint8_t *sig_out = outbuf->base + outbuf->off;
+                if (psa_sign_hash(self->key_id, sign_algo, hash_value, hash_length, sig_out, nb_bytes,
                     &signature_length) != 0) {
                     ret = PTLS_ERROR_INCOMPATIBLE_KEY;
+                } else if (is_ecdsa) {
+                    /* convert PSA raw r||s → DER in-place using temp buffer */
+                    uint8_t der_buf[150]; /* plenty for secp521r1 max ~139 bytes */
+                    size_t der_len = 0;
+                    if (ecdsa_raw_to_der(sig_out, signature_length, der_buf, sizeof(der_buf), &der_len) != 0) {
+                        ret = PTLS_ERROR_INCOMPATIBLE_KEY;
+                    } else {
+                        memcpy(sig_out, der_buf, der_len);
+                        outbuf->off += der_len;
+                    }
                 } else {
                     outbuf->off += signature_length;
                 }
