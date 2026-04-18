@@ -26,7 +26,9 @@ jobs:
           npm install
       
       - name: Build webtransportd
-        run: make webtransportd handshake_echo_test
+        run: |
+          cmake -B build -DCMAKE_C_COMPILER=cc
+          cmake --build build --target webtransportd --target handshake_echo_test --parallel
       
       - name: Create test site
         run: |
@@ -47,9 +49,7 @@ jobs:
           sleep 3
       
       - name: Run unit tests
-        run: |
-          make test 2>&1 | tee /tmp/test.log
-          grep -q "OK     all tests passed" /tmp/test.log || exit 1
+        run: ctest --test-dir build --output-on-failure 2>&1 | tee /tmp/test.log
       
       - name: Run echo test
         run: timeout 20 ./handshake_echo_test 2>&1 | tee /tmp/echo-test.log
