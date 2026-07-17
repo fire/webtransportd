@@ -192,6 +192,7 @@ set(DAEMON_SRCS
     adapters/child_output.c
     adapters/autocert.c
     adapters/child_process.c
+    adapters/child_socket.c
     adapters/log.c
     adapters/cmdline.c
 )
@@ -265,6 +266,7 @@ add_unit_test(child_output_test  adapters/child_output.c core/session.c
                                  core/work_queue.c core/frame.c
                                  adapters/log.c)
 add_unit_test(child_process_test adapters/child_process.c adapters/cmdline.c)
+add_unit_test(child_socket_test  adapters/child_socket.c)
 
 # autocert needs mbedtls so use the vendor helper
 add_vendor_test(autocert_test adapters/autocert.c)
@@ -310,7 +312,7 @@ endforeach()
 set_tests_properties(
     frame_test frame_fuzz_test frame_helper_test log_test env_test
     cmdline_test work_queue_test session_test child_output_test
-    child_process_test autocert_test
+    child_process_test child_socket_test autocert_test
     version_test selftest_test help_test windows_manifest_test
     picoquic_link_test picoquic_create_test handshake_test
     handshake_echo_test handshake_concurrent_test handshake_static_test
